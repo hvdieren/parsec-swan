@@ -74,18 +74,40 @@ ifdef version
     benchmark_base := ferret-tbb
     LDLIBS += -ltbb -ltbbmalloc
   endif
+  ifeq "$(version)" "swan-queue"
+    benchmark_base := ferret-swan-queue
+    LDLIBS +=
+  endif
+  ifeq "$(version)" "swan-obj"
+    benchmark_base := ferret-swan-obj
+    LDLIBS +=
+  endif
 endif
 
 benchmark_src := $(benchmark_base).c
 ifeq "$(version)" "tbb"
   benchmark_src := $(benchmark_base).cpp
 endif
+ifeq "$(version)" "swan-queue"
+  benchmark_src := $(benchmark_base).cc
+endif
+ifeq "$(version)" "swan-obj"
+  benchmark_src := $(benchmark_base).cc
+endif
 
 benchmark_tgt := $(notdir $(benchmark_src))
 ifeq "$(version)" "tbb"
   benchmark_tgt := $(addprefix $(BINDIR)/, $(benchmark_tgt:.cpp=))
 else
+ifeq "$(version)" "swan-queue"
+  benchmark_tgt := $(addprefix $(BINDIR)/, $(benchmark_tgt:.cc=))
+else
+ifeq "$(version)" "swan-obj"
+  benchmark_tgt := $(addprefix $(BINDIR)/, $(benchmark_tgt:.cc=))
+else
   benchmark_tgt := $(addprefix $(BINDIR)/, $(benchmark_tgt:.c=))
+endif
+endif
 endif
 
 benchmark : $(benchmark_tgt)
@@ -105,21 +127,25 @@ install:
 
 $(OBJDIR)/%.o : %.c
 	@echo "   CC '$<' ==> '$@'"
-	@$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/%.o : %.cpp
 	@echo "   CXX '$<' ==> '$@'"
-	@$(CXX) $(CFLAGS) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/%.o : %.cc
+	@echo "   CXX '$<' ==> '$@'"
+	$(CXX) $(CFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(tools_tgt): $(BINDIR)/% : $(OBJDIR)/%.o $(LIBDIR)/libcass.a
 	@echo "   CXX '$<' ==> '$@'"
-	@$(CXX) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
+	$(CXX) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 
 $(benchmark_tgt): $(BINDIR)/% : $(OBJDIR)/%.o $(LIBDIR)/libcass.a $(LIBDIR)/libcassimage.a
 	@echo "   CXX '$<' ==> '$@'"
-	@$(CXX) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
+	$(CXX) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 
 $(image_tgt): $(BINDIR)/% : $(OBJDIR)/%.o $(LIBDIR)/libcass.a $(LIBDIR)/libcassimage.a
 	@echo "   CXX '$<' ==> '$@'"
-	@$(CXX) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
+	$(CXX) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 

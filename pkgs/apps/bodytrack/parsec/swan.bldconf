@@ -18,10 +18,10 @@
 build_deps="gsl libjpeg"
 
 # Temporary variable with all flags
-bodytrack_flags="CXXFLAGS=\"-I${PARSECDIR}/pkgs/libs/gsl/inst/${PARSECPLAT}/include -I${PARSECDIR}/pkgs/libs/libjpeg/inst/${PARSECPLAT}/include -I${HOME}/research/swan-queue -I${HOME}/research/swan-queue/swan -I${HOME}/research/swan-queue/obj -I${HOME}/research/swan-queue/obj/scheduler ${CXXFLAGS} -fexceptions\" LDFLAGS=\"-L${PARSECDIR}/pkgs/libs/gsl/inst/${PARSECPLAT}/lib -L${PARSECDIR}/pkgs/libs/libjpeg/inst/${PARSECPLAT}/lib ${LDFLAGS}\""
+ferret_flags="CFLAGS=\"-I${PARSECDIR}/pkgs/libs/gsl/inst/${PARSECPLAT}/include -I${PARSECDIR}/pkgs/libs/libjpeg/inst/${PARSECPLAT}/include -I${HOME}/research/swan-queue -I${HOME}/research/swan-queue/swan -I${HOME}/research/swan-queue/obj -I${HOME}/research/swan-queue/obj/scheduler ${CFLAGS}\" LDFLAGS=\"-L${PARSECDIR}/pkgs/libs/gsl/inst/${PARSECPLAT}/lib -L${PARSECDIR}/pkgs/libs/libjpeg/inst/${PARSECPLAT}/lib ${HOME}/research/swan-queue/obj/scheduler/libschedulers.a -lhwloc -lpthread ${LDFLAGS}\""
 
 # Environment to use for configure script and Makefile
-#build_env="version=\"swan\" ${bodytrack_flags}"
+#build_env="version=\"swan\" ${ferret_flags}"
 
 # Whether the build system supports only in-place compilation.
 # If TRUE, then all sources will be copied to the build directory before we
@@ -30,4 +30,4 @@ bodytrack_flags="CXXFLAGS=\"-I${PARSECDIR}/pkgs/libs/gsl/inst/${PARSECPLAT}/incl
 build_inplace="TRUE"
 
 # Arguments to pass to the configure script, if it exists
-build_conf="--disable-threads --disable-openmp --disable-tbb --enable-swan"
+build_conf=""
