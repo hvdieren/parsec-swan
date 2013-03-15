@@ -1,13 +1,19 @@
 #include <unistd.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include "util.h"
 #include "debug.h"
 #include "dedupdef.h"
-#include "encoder.h"
 #include "decoder.h"
 #include "config.h"
 #include "queue.h"
+#ifdef __cplusplus
+};
+#endif
+#include "encoder.h"
 
 #ifdef ENABLE_DMALLOC
 #include <dmalloc.h>

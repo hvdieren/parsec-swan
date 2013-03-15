@@ -143,7 +143,8 @@ mbuffer_t *mbuffer_clone(mbuffer_t *m) {
   PTHREAD_UNLOCK(&locks[lock_hash(m->mcb)]);
 #else
   assert(m->mcb->i>=1);
-  m->mcb->i++;
+  // m->mcb->i++;
+  __sync_fetch_and_add( &m->mcb->i, 1 );
 #endif //ENABLE_PTHREADS
 
   //copy state, use joint mcb
@@ -199,8 +200,9 @@ void mbuffer_free(mbuffer_t *m) {
   ref = m->mcb->i;
   PTHREAD_UNLOCK(&locks[lock_hash(m->mcb)]);
 #else
-  m->mcb->i--;
-  ref = m->mcb->i;
+  // m->mcb->i--;
+  // ref = m->mcb->i;
+  ref = __sync_fetch_and_add( &m->mcb->i, -1 )-1;
 #endif //ENABLE_PTHREADS
 
   //NOTE: No need to synchronize access to ref counter value again because if it has hit 0 the buffer is dead
@@ -283,7 +285,8 @@ int mbuffer_split(mbuffer_t *m1, mbuffer_t *m2, size_t split) {
   PTHREAD_UNLOCK(&locks[lock_hash(m1->mcb)]);
 #else
   assert(m1->mcb->i>=1);
-  m1->mcb->i++;
+  // m1->mcb->i++;
+  __sync_fetch_and_add( &m1->mcb->i, 1 );
 #endif //ENABLE_PTHREADS
 
   //split buffer
