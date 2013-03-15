@@ -53,8 +53,14 @@ bin_PROGRAMS = bodytrack$(EXEEXT)
 @ENABLE_TBB_TRUE@                       TrackingModelTBB.h \
 @ENABLE_TBB_TRUE@                       TrackingModelTBB.cpp
 
+@ENABLE_SWAN_TRUE@am__append_3b = \
+@ENABLE_SWAN_TRUE@                       ParticleFilterSwan.h \
+@ENABLE_SWAN_TRUE@                       TrackingModelSwan.h \
+@ENABLE_SWAN_TRUE@                       TrackingModelSwan.cpp
+
 @ENABLE_THREADS_TRUE@am__append_4 = threads/libthreads.la
 @ENABLE_TBB_TRUE@am__append_5 = -ltbb
+@ENABLE_SWAN_TRUE@am__append_5b = ${HOME}/research/swan-queue/obj/scheduler/libschedulers.a -lhwloc
 subdir = TrackingBenchmark
 DIST_COMMON = $(srcdir)/Makefile.am $(srcdir)/Makefile.in
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
@@ -83,13 +89,14 @@ am__bodytrack_SOURCES_DIST = DMatrix.h GeneralUtil.h ParticleFilter.h \
 @ENABLE_THREADS_TRUE@am__objects_2 = TrackingModelPthread.$(OBJEXT) \
 @ENABLE_THREADS_TRUE@	AsyncIO.$(OBJEXT)
 @ENABLE_TBB_TRUE@am__objects_3 = TrackingModelTBB.$(OBJEXT)
+@ENABLE_SWAN_TRUE@am__objects_3b = TrackingModelSwan.$(OBJEXT)
 am_bodytrack_OBJECTS = AnnealingFactor.$(OBJEXT) \
 	BodyGeometry.$(OBJEXT) BodyPose.$(OBJEXT) \
 	CameraModel.$(OBJEXT) CovarianceMatrix.$(OBJEXT) \
 	ImageMeasurements.$(OBJEXT) ImageProjection.$(OBJEXT) \
 	RandomGenerator.$(OBJEXT) TrackingModel.$(OBJEXT) \
 	main.$(OBJEXT) $(am__objects_1) $(am__objects_2) \
-	$(am__objects_3)
+	$(am__objects_3) $(am__objects_3b)
 bodytrack_OBJECTS = $(am_bodytrack_OBJECTS)
 @ENABLE_THREADS_TRUE@am__DEPENDENCIES_1 = threads/libthreads.la
 am__DEPENDENCIES_2 =
@@ -161,6 +168,9 @@ ENABLE_TBB_TRUE = @ENABLE_TBB_TRUE@
 ENABLE_THREADS = @ENABLE_THREADS@
 ENABLE_THREADS_FALSE = @ENABLE_THREADS_FALSE@
 ENABLE_THREADS_TRUE = @ENABLE_THREADS_TRUE@
+ENABLE_SWAN = @ENABLE_SWAN@
+ENABLE_SWAN_FALSE = @ENABLE_SWAN_FALSE@
+ENABLE_SWAN_TRUE = @ENABLE_SWAN_TRUE@
 EXEEXT = @EXEEXT@
 F77 = @F77@
 FFLAGS = @FFLAGS@
@@ -239,10 +249,10 @@ bodytrack_SOURCES = DMatrix.h GeneralUtil.h ParticleFilter.h \
 	CovarianceMatrix.cpp ImageMeasurements.h ImageMeasurements.cpp \
 	ImageProjection.h ImageProjection.cpp RandomGenerator.h \
 	RandomGenerator.cpp TrackingModel.h TrackingModel.cpp main.cpp \
-	$(am__append_1) $(am__append_2) $(am__append_3)
-AM_CPPFLAGS = -I$(VPATH)/../FlexImageLib
+	$(am__append_1) $(am__append_2) $(am__append_3) $(am__append_3b)
+AM_CPPFLAGS = -I$(srcdir)/../FlexImageLib
 bodytrack_LDADD = ../FlexImageLib/libflex.la -lm $(am__append_4) \
-	$(am__append_5)
+	$(am__append_5) $(am__append_5b)
 @ENABLE_THREADS_TRUE@SUBDIRS = threads
 all: all-recursive
 

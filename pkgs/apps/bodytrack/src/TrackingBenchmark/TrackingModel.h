@@ -43,6 +43,7 @@
 
 class TrackingModel{
 protected:
+	public: // HV: TODO: remove
 	std::vector<BinaryImage >				mFGMaps;			// Background segmented images from each camera 
 	std::vector<FlexImage8u>				mEdgeMaps;			// edge processed images from each camera
 	std::vector<std::vector<float> >		mStdDevs;			// standard deviations for each layer of annealed particle filtering

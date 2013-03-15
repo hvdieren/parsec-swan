@@ -18,7 +18,7 @@
 //				  They are kept separate for readability.
 //
 //				  Thread methods supported are selected by the 
-//				  #defines USE_OPENMP, USE_THREADS, USE_TBB or USE_SWAN. 
+//				  #defines USE_OPENMP, USE_THREADS or USE_TBB. 
 //
 //  modified : 
 //--------------------------------------------------------------
@@ -36,7 +36,6 @@
 //#define USE_OPENMP
 //#define USE_THREADS
 //#define USE_TBB
-//#define USE_SWAN
 
 #if defined(USE_OPENMP)
 #include <omp.h>
@@ -58,12 +57,6 @@
 using namespace tbb;
 #endif //USE_TBB
 
-#if defined(USE_SWAN)
-#include "swan/wf_interface.h"
-#include "TrackingModelSwan.h"
-#include "ParticleFilterSwan.h"
-#endif // USE_SWAN
-
 #if defined(ENABLE_PARSEC_HOOKS)
 #include <hooks.h>
 #endif //ENABLE_PARSEC_HOOKS
@@ -72,8 +65,8 @@ using namespace tbb;
 #include "TrackingModel.h"
 #include "system.h"
 
-using namespace std;
 
+using namespace std;
 
 //templated conversion from string
 template<class T>
@@ -322,7 +315,7 @@ int mainTBB(string path, int cameras, int frames, int particles, int layers, int
 	tbb::pipeline pipeline;
 	pipeline.add_filter(model);
 	pipeline.add_filter(pf);
-	pipeline.run(2);
+	pipeline.run(1);
 	pipeline.clear();
 
 	return 1;
@@ -330,7 +323,6 @@ int mainTBB(string path, int cameras, int frames, int particles, int layers, int
 #endif 
 
 
-#if 0
 //Body tracking Single Threaded
 int mainSingleThread(string path, int cameras, int frames, int particles, int layers, bool OutputBMP)
 {
@@ -341,8 +333,7 @@ int mainSingleThread(string path, int cameras, int frames, int particles, int la
 	{	cout << endl << "Error loading initialization data." << endl;
 		return 0;
 	}
-	int res;
-	model.GetObservation(0, &res);															//load data for first frame
+	model.GetObservation(0);															//load data for first frame
 	ParticleFilter<TrackingModel> pf;													//particle filter instantiated with body tracking model type
 	pf.SetModel(model);																	//set the particle filter model
 	pf.InitializeParticles(particles);													//generate initial set of particles and evaluate the log-likelihoods
@@ -373,76 +364,13 @@ int mainSingleThread(string path, int cameras, int frames, int particles, int la
 
 	return 1;
 }
-#endif
-
-#if USE_SWAN
-//Body tracking Single Threaded
-int mainSwan(string *path_ptr, int cameras, int frames, int particles, int layers, bool OutputBMP)
-{
-	cout << endl << "Running Swan" << endl << endl;
-	object_t<ImageSetToken*> tokenObj;
-	ParticleFilterPipe<TrackingModelPipe> pf;										//particle filter instantiated with body tracking model type
-	// ImageSetToken* token = (ImageSetToken*) new ImageSetToken;	
-	int res;
-	TrackingModelPipe model;
-
-	string path = *path_ptr;
-	//stimer_t tmr_initiallize;
-	//stimer_t tmr_pipeline;
-	//stimer_tick(&tmr_initiallize);
-	leaf_call(initialize_wrapper, &model, &path, cameras, layers, &res);
-	if(!res)
-	{	cout << endl << "Error loading initialization data." << endl;
-		return 0;
-	}
-	leaf_call(SetNumThreads_wrapper, &model, particles);
-	leaf_call(SetNumFrames_wrapper, &model, frames);
-	model.GetObservation(0);															//load data for first frame
-
-	
-	pf.SetModel(model);																	//set the particle filter model
-	pf.setOutputBMP(OutputBMP);
-	call(initializeParticles_wrapper, &pf, particles);
-
-	cout << "Using dataset : " << path << endl;
-	cout << particles << " particles with " << layers << " annealing layers" << endl << endl;
-	ofstream outputFileAvg((path + "poses.txt").c_str());
-														//expected pose from particle distribution
-	
-	// tokenObj = token;
-	string output = path+"poses.txt";
-#if defined(ENABLE_PARSEC_HOOKS)
-        __parsec_roi_begin();
-#endif
-	//stimer_tuck(&tmr_initiallize, "Initializations took: ");
-	//stimer_tick(&tmr_pipeline);
-	unversioned<void>serialize1;
-	unversioned<void>serialize2;
-
-	// HV: TODO: model and pf should probably be inoutdep
-
-	for(int i = 0; i < frames; i++)														//process each set of frames
-	{	
-		spawn(stage1, &model, (outdep<ImageSetToken*>) tokenObj, i, (inoutdep<void>)serialize1);
-		spawn(stage2, &pf, (indep<ImageSetToken*>) tokenObj, &output, i, (inoutdep<void>)serialize2);
-	}
-	ssync();
-	//stimer_tuck(&tmr_pipeline, "Pipeline took: ");
-
-#if defined(ENABLE_PARSEC_HOOKS)
-        __parsec_roi_end();
-#endif
-
-	return 1;
-}
-#endif
 
 int main(int argc, char **argv)
 {
 	string path;
 	bool OutputBMP;
 	int cameras, frames, particles, layers, threads, threadModel;								//process command line parameters to get path, cameras, and frames
-	// stimer_t tmr;
+
 #ifdef PARSEC_VERSION
 #define __PARSEC_STRING(x) #x
 #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
@@ -457,74 +385,67 @@ int main(int argc, char **argv)
 	if(!ProcessCmdLine(argc, argv, path, cameras, frames, particles, layers, threads, threadModel, OutputBMP))	
 		return 0;
 
-	if(threadModel == 0) {
+        if(threadModel == 0) {
 #if defined(USE_TBB)
-   	threadModel = 1;
+                threadModel = 1;
 #elif defined(USE_THREADS)
-      threadModel = 2;
+                threadModel = 2;
 #elif defined(USE_OPENMP)
-      threadModel = 3;
+                threadModel = 3;
 #else
-      threadModel = 4;
+                threadModel = 4;
 #endif
-	}
+        }
 	switch(threadModel)
 	{
 		case 0 : 
-			//This case should never happen, we auto-select the thread model before this switch
-         cout << "Internal error. Aborting." << endl;
-         exit(1);
+                        //This case should never happen, we auto-select the thread model before this switch
+                        cout << "Internal error. Aborting." << endl;
+                        exit(1);
 			break;
 
-		case 1 :
-      	#if defined(USE_TBB)
-         mainTBB(path, cameras, frames, particles, layers, threads, OutputBMP);                  //Intel TBB threads tracking
-         break;
-         #else
-         cout << "Not compiled with Intel TBB support. " << endl;
-         cout << "If the environment supports it, rebuild with USE_TBB #defined." << endl;
-         break;  
-         #endif
+                case 1 :
+                        #if defined(USE_TBB)
+                        mainTBB(path, cameras, frames, particles, layers, threads, OutputBMP);                  //Intel TBB threads tracking
+                        break;
+                        #else
+                        cout << "Not compiled with Intel TBB support. " << endl;
+                        cout << "If the environment supports it, rebuild with USE_TBB #defined." << endl;
+                        break;  
+                        #endif
 
-		case 2 :
-			#if defined(USE_THREADS)
-         mainPthreads(path, cameras, frames, particles, layers, threads, OutputBMP);             //Posix threads tracking
-         break;
-         #else
-         cout << "Not compiled with Posix threads support. " << endl;
-         cout << "If the environment supports it, rebuild with USE_THREADS #defined." << endl;
-         break;
-         #endif
+                case 2 :
+                        #if defined(USE_THREADS)
+                                mainPthreads(path, cameras, frames, particles, layers, threads, OutputBMP);             //Posix threads tracking
+                                break;
+                        #else
+                                cout << "Not compiled with Posix threads support. " << endl;
+                                cout << "If the environment supports it, rebuild with USE_THREADS #defined." << endl;
+                                break;
+                        #endif
 
 		case 3 : 
 			#if defined(USE_OPENMP)
-			mainOMP(path, cameras, frames, particles, layers, threads, OutputBMP);			//OpenMP threaded tracking
-			break;
+				mainOMP(path, cameras, frames, particles, layers, threads, OutputBMP);			//OpenMP threaded tracking
+				break;
 			#else
-			cout << "Not compiled with OpenMP support. " << endl;
-			cout << "If the environment supports OpenMP, rebuild with USE_OPENMP #defined." << endl;
-			break;
+				cout << "Not compiled with OpenMP support. " << endl;
+				cout << "If the environment supports OpenMP, rebuild with USE_OPENMP #defined." << endl;
+				break;
 			#endif
 
-		case 4 :
-			#if defined(USE_SWAN)
-			// stimer_tick(&tmr);
-			run(mainSwan, &path, cameras, frames, particles, layers, OutputBMP);
-			// stimer_tuck(&tmr, "All Calculations took: ");
-			#else
-			cout << "Not compiled with Swan support. " << endl;
-			cout << "If the environment supports Swan, rebuild with USE_SWAN #defined." << endl;
-			#endif
-         break;
+                case 4 :
+                        mainSingleThread(path, cameras, frames, particles, layers, OutputBMP);                          //single threaded tracking
+                        break;
 
 
 		default : 
 			cout << "Invalid thread model argument. " << endl;
 			cout << "Thread model : 0 = Auto-select thread model" << endl;
-         cout << "               1 = Intel TBB" << endl;
-         cout << "               2 = Posix / Windows Threads" << endl;
-         cout << "               3 = OpenMP" << endl;
-         cout << "               4 = Serial" << endl;
+                        cout << "               1 = Intel TBB" << endl;
+                        cout << "               2 = Posix / Windows Threads" << endl;
+                        cout << "               3 = OpenMP" << endl;
+                        cout << "               4 = Serial" << endl;
 			break;
 	}
 
