@@ -386,7 +386,7 @@ void pipeline()
 	unversioned<vec_query_data> vecarg;
 	unversioned<rank_data> rankarg;
 */
-	queue_t<load_data> load_queue;
+	hyperqueue<load_data> load_queue;
 
 	spawn(t_load, query_dir, (pushdep<load_data>)load_queue);
 	
