@@ -42,6 +42,7 @@ extern "C" {
 
 #ifdef ENABLE_SWAN
 #include "swan/wf_interface.h"
+#include "swan/queue/queue_t.h"
 #include "binheap.h"
 #endif
 
@@ -680,7 +681,7 @@ void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) 
 void SwanIntegratedPipeline(struct thread_args * args) {
     obj::hyperqueue<chunk_t *> queue;
 
-#if 0
+#if 1
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue );
     spawn( sub_DCW, args, (obj::popdep<chunk_t*>)queue );
     ssync();
