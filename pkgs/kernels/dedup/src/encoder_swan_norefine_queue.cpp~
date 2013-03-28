@@ -551,50 +551,61 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     cnt = 0;
     do {
       split = 0;
-      int offset = leaf_call(rabinseg,(uchar*)((chunk_t*)chunk_obj)->uncompressed_data.ptr, (int)((chunk_t*)chunk_obj)->uncompressed_data.n, rf_win_dataprocess, rabintab, rabinwintab);
-  //Did we find a split location?
-      if(offset == 0) {
-	//Split found at the very beginning of the buffer (should never happen due to technical limitations)
-	assert(0);
-	split = 0;
-      } else if(offset < (int)((chunk_t*)chunk_obj)->uncompressed_data.n) {
-	//Split found somewhere in the middle of the buffer
-	//Allocate a new chunk and create a new memory buffer
-	temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
-	if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
+      //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
+      if(ANCHOR_JUMP < ((chunk_t*)chunk_obj)->uncompressed_data.n) {
+	  int offset = leaf_call(rabinseg,(uchar*)((chunk_t*)chunk_obj)->uncompressed_data.ptr, (int)((chunk_t*)chunk_obj)->uncompressed_data.n, rf_win_dataprocess, rabintab, rabinwintab);
+      //Did we find a split location?
+	  if(offset == 0) {
+	    //Split found at the very beginning of the buffer (should never happen due to technical limitations)
+	    assert(0);
+	    split = 0;
+	  } else if(offset < (int)((chunk_t*)chunk_obj)->uncompressed_data.n) {
+	    //Split found somewhere in the middle of the buffer
+	    //Allocate a new chunk and create a new memory buffer
+	    temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
+	    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
 
-	//split it into two pieces
-	r = leaf_call(mbuffer_split,&((chunk_t*)chunk_obj)->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
-	if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
-	temp->header.state = CHUNK_STATE_UNCOMPRESSED;
+	    //split it into two pieces
+	    r = leaf_call(mbuffer_split,&((chunk_t*)chunk_obj)->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
+	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
 
-#ifdef ENABLE_STATISTICS
-	//update statistics
-	stats.nChunks[CHUNK_SIZE_TO_SLOT(((chunk_t*)chunk_obj)->uncompressed_data.n)]++;
-#endif //ENABLE_STATISTICS
+    #ifdef ENABLE_STATISTICS
+	    //update statistics
+	    stats.nChunks[CHUNK_SIZE_TO_SLOT(((chunk_t*)chunk_obj)->uncompressed_data.n)]++;
+    #endif //ENABLE_STATISTICS
 
-	// This trick creates a new chunk_obj version if required.
-	// call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk);
+	    // This trick creates a new chunk_obj version if required.
+	    // call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk);
+	    
+	    //Deduplicate
+	    spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::cinoutdep<hashtable*>)cache_obj);
 
-	//Deduplicate
-	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::cinoutdep<hashtable*>)cache_obj);
+	    //If chunk is unique compress & archive it.
+	    spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
 
-	//If chunk is unique compress & archive it.
-	spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
+	    spawn(write_chunk_to_file_df,(obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
 
-	spawn(write_chunk_to_file_df,(obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-
-	//prepare for next iteration
-	/*chunk_obj =*/ // chunk = temp;
-	call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, temp);
-	temp = NULL;
-	split = 1;
+	    //prepare for next iteration
+	    /*chunk_obj =*/ // chunk = temp;
+	    call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, temp);
+	    temp = NULL;
+	    split = 1;
+	  } else {
+	    //Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
+	    //This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
+	    // temp = chunk;
+	    // temp = (chunk_t*)chunk_obj;
+	    /*chunk_obj =*/ //chunk = NULL;
+	    // call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, (chunk_t*)0);
+	    split = 0;
+	  }
       } else {
-	//Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
-	//This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
+	//NOTE: We don't process the stub, instead we try to read in more data so we might be able to find a proper split.
+	//      Only once the end of the file is reached do we get a genuine stub which will be enqueued right after the read operation.
 	// temp = chunk;
 	// temp = (chunk_t*)chunk_obj;
-	/*chunk_obj =*/ //chunk = NULL;
+	// chunk = NULL;
 	// call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, (chunk_t*)0);
 	split = 0;
       }

@@ -611,11 +611,6 @@ void SwanIntegratedPipeline(struct thread_args * args) {
       break;
     }
 
-    // "FragmentRefine"
-#if 0
-    spawn( sub_FragmentRefine_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-    ssync();
-#else
     //partition input block into fine-granular chunks
     int split;
     ssync(); // TODO
@@ -675,7 +670,6 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     ssync(); // TODO
     temp = (chunk_t*)chunk_obj;
     chunk_obj = chunk = 0;
-#endif
   }
 
   leaf_call(free, (void*)rabintab);
