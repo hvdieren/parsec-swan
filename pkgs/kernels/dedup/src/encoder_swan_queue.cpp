@@ -42,6 +42,7 @@ extern "C" {
 
 #ifdef ENABLE_SWAN
 #include "swan/wf_interface.h"
+#include "swan/queue/queue_t.h"
 #include "binheap.h"
 #endif
 
@@ -251,7 +252,7 @@ static void write_chunk_to_file(int fd, chunk_t *chunk) {
       free((void*)chunk);
 } 
 static void write_chunk_to_file_df(obj::inoutdep<int> fd, obj::indep<chunk_t *>chunk) {
-   // printf( "write: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
+    //printf( "write: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
    leaf_call(write_chunk_to_file, (int)fd, (chunk_t*)chunk );
 }
 
@@ -343,8 +344,13 @@ void sub_Compress(chunk_t *chunk) {
 }
 
 void sub_Compress_df(obj::inoutdep<chunk_t *>chunk) {
-    // printf( "compress: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
+    //printf( "compress: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
     leaf_call( sub_Compress, (chunk_t*)chunk );
+}
+
+void sub_Compress_push_df(obj::inoutdep<chunk_t *>chunk, obj::pushdep<chunk_t *>queue ) {
+    leaf_call( sub_Compress, (chunk_t*)chunk );
+    queue.push( (chunk_t*)chunk );
 }
 
 
@@ -400,8 +406,8 @@ void sub_Deduplicate(chunk_t *chunk) {
   return;
 }
 
-void sub_Deduplicate_df(obj::inoutdep<chunk_t *>chunk, obj::inoutdep /*cinoutdep*/ <hashtable*>) {
-    // printf( "dedup: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
+void sub_Deduplicate_df(obj::inoutdep<chunk_t *>chunk, obj::/*c*/inoutdep<hashtable*>) {
+    //printf( "dedup: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
     leaf_call(sub_Deduplicate, (chunk_t*)chunk);
 }
 
@@ -409,97 +415,196 @@ void sub_SHA1_df(obj::inoutdep<chunk_t *>chunk) {
     leaf_call(sub_SHA1, (chunk_t*)chunk);
 }
 
+// void sub_FragmentRefine_df(obj::inoutdep<chunk_t *>chunk_in) 
+
 void set_chunk_obj( obj::outdep<chunk_t*> chunk_obj, chunk_t * temp) {
     chunk_obj = temp;
 }
 
-void sub_FragmentRefine_df( obj::inoutdep /*cinoutdep*/ <hashtable*> cache_obj_in, obj::inoutdep<int> fd_out_in, obj::indep<chunk_t *> chunk_in ) {
-  int r;
-  chunk_t * temp;
-  obj::object_t<chunk_t *> chunk_obj;
-  chunk_obj = (chunk_t*)chunk_in;
-  obj::object_t<int> fd_out;
-  fd_out = (int)fd_out_in;
-  obj::object_t<hashtable*> cache_obj;
-  cache_obj = (hashtable*)cache_obj_in;
+void sub_DCW( struct thread_args * args,
+	      obj::popdep<chunk_t*> queue ) {
+    obj::object_t<chunk_t *> chunk_obj;
 
-  u32int * rabintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
-  u32int * rabinwintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
-  if(rabintab == NULL || rabinwintab == NULL) {
-    EXIT_TRACE("Memory allocation failed.\n");
-  }
+    obj::object_t<int> fd_out;
+    fd_out = leaf_call(create_output_file,conf->outfile);
 
-  // printf( "FragmentRefine...\n" );
+    obj::unversioned<hashtable *> cache_obj;
+    cache_obj = cache;
 
-  rabininit(rf_win, rabintab, rabinwintab);
+    while( !queue.empty() ) {
+	chunk_t * chunk = queue.pop();
 
-    //partition input block into fine-granular chunks
-    int split;
-    do {
-      split = 0;
-      //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
-	  int offset = leaf_call(rabinseg,(uchar*)((chunk_t*)chunk_obj)->uncompressed_data.ptr, (int)((chunk_t*)chunk_obj)->uncompressed_data.n, rf_win, rabintab, rabinwintab);
-      //Did we find a split location?
-	  if(offset < (int)((chunk_t*)chunk_obj)->uncompressed_data.n) {
-	    //Split found somewhere in the middle of the buffer
-	    //Allocate a new chunk and create a new memory buffer
-	    temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
-	    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
+	/// Rename (even if not necessary)
+	{
+	    obj::outdep<chunk_t *> obj_ext
+		= obj::outdep<chunk_t*>::create( chunk_obj.get_version() );
+	    obj::outdep<chunk_t *> obj_int;
+	    obj::outdep<chunk_t *>::dep_tags tags;
 
-	    //split it into two pieces
-	    r = leaf_call(mbuffer_split,&((chunk_t*)chunk_obj)->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
-	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
-	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
+	    obj::rename<obj::outdep<chunk_t *>::metadata_t, chunk_t *>( 
+		obj_ext, obj_int, tags );
 
-    #ifdef ENABLE_STATISTICS
-	    //update statistics
-	    stats.nChunks[CHUNK_SIZE_TO_SLOT(((chunk_t*)chunk_obj)->uncompressed_data.n)]++;
-    #endif //ENABLE_STATISTICS
-
-	    split = 1;
-	} else {
-	    // Quit loop. Last piece of fragment.
-	    split = 0;
+	    chunk_obj = chunk;
 	}
+
+	// spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
 
 	//Deduplicate
 	spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj);
+	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
+	      (obj::/*c*/inoutdep<hashtable*>)cache_obj);
 
 	//If chunk is unique compress & archive it.
 	spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
 
-	spawn(write_chunk_to_file_df,(obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-
-	//prepare for next iteration
-	call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, temp);
-	temp = NULL;
-    } while(split);
+	spawn(write_chunk_to_file_df,(obj::inoutdep<int>)fd_out,
+	      (obj::indep<chunk_t*>)chunk_obj);
+    }
     ssync();
 
-  leaf_call(free, (void*)rabintab);
-  leaf_call(free, (void*)rabinwintab);
-
-  return;
+    leaf_call(close, (int)fd_out);
 }
 
-/* 
- * Integrate all computationally intensive pipeline
- * stages to improve cache efficiency.
- */
-void SwanIntegratedPipeline(struct thread_args * args) {
-  size_t preloading_buffer_seek = 0;
-  int fd = args->fd;
-  obj::object_t<int> fd_out;
-  fd_out = leaf_call(create_output_file,conf->outfile);
+// This should/could be prefixdep and push...
+// The push could be replaced by a reducer...
+// We would benefit from the ringbuffers and/or a peek window/bulk sync in queue
+void sub_DC( struct thread_args * args,
+	     obj::popdep<chunk_t*> queue_in,
+	     obj::pushdep<chunk_t*> queue_out ) {
+    obj::object_t<chunk_t *> chunk_obj;
+
+    obj::unversioned<hashtable *> cache_obj;
+    cache_obj = cache;
+
+    while( !queue_in.empty() ) {
+	chunk_t * chunk = queue_in.pop();
+
+	/// Rename (even if not necessary)
+	{
+	    obj::outdep<chunk_t *> obj_ext
+		= obj::outdep<chunk_t*>::create( chunk_obj.get_version() );
+	    obj::outdep<chunk_t *> obj_int;
+	    obj::outdep<chunk_t *>::dep_tags tags;
+
+	    obj::rename<obj::outdep<chunk_t *>::metadata_t, chunk_t *>( 
+		obj_ext, obj_int, tags );
+
+	    chunk_obj = chunk;
+	}
+
+	// spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
+
+	//Deduplicate
+	spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
+	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
+	      (obj::/*c*/inoutdep<hashtable*>)cache_obj);
+
+	//If chunk is unique compress & archive it.
+	spawn(sub_Compress_push_df, (obj::inoutdep<chunk_t*>)chunk_obj,
+	      queue_out );
+
+	// queue_out.push( chunk );
+    }
+    ssync();
+}
+
+void sub_W( struct thread_args * args,
+	    obj::popdep<chunk_t*> queue ) {
+    int fd_out = leaf_call(create_output_file,conf->outfile);
+
+    while( !queue.empty() ) {
+	chunk_t * chunk = queue.pop();
+
+	leaf_call(write_chunk_to_file, fd_out, chunk);
+    }
+
+    leaf_call(close, (int)fd_out);
+}
+
+void sub_FragmentRefine_df( struct thread_args * args,
+			    obj::popdep<chunk_t *> queue_in,
+			    obj::pushdep<chunk_t *> queue_out) {
+  const int qid = args->tid / MAX_THREADS_PER_QUEUE;
   int r;
 
-  obj::object_t<hashtable *> cache_obj; // TODO: unversioned
-  cache_obj = cache;
+  chunk_t *temp;
+  chunk_t *chunk;
+  u32int * rabintab = malloc(256*sizeof rabintab[0]);
+  u32int * rabinwintab = malloc(256*sizeof rabintab[0]);
+  if(rabintab == NULL || rabinwintab == NULL) {
+    EXIT_TRACE("Memory allocation failed.\n");
+  }
+
+  while ( !queue_in.empty() ) {
+    chunk = queue_in.pop();
+
+    leaf_call(rabininit,rf_win, rabintab, rabinwintab);
+
+    int split;
+    do {
+      //Find next anchor with Rabin fingerprint
+	int offset = leaf_call(rabinseg, (uchar*)chunk->uncompressed_data.ptr, (int)chunk->uncompressed_data.n, rf_win, rabintab, rabinwintab);
+      //Can we split the buffer?
+      if(offset < chunk->uncompressed_data.n) {
+        //Allocate a new chunk and create a new memory buffer
+	temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
+        if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
+        temp->header.state = chunk->header.state;
+        // temp->sequence.l1num = chunk->sequence.l1num;
+
+        //split it into two pieces
+        r = leaf_call(mbuffer_split,&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+        if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
+
+        //Set correct state and sequence numbers
+        // chunk->sequence.l2num = chcount;
+        // chunk->isLastL2Chunk = FALSE;
+        // chcount++;
+
+#ifdef ENABLE_STATISTICS
+        //update statistics
+        // thread_stats->nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
+        __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
+#endif //ENABLE_STATISTICS
+
+        //put it into send buffer
+	queue_out.push( chunk );
+
+        //prepare for next iteration
+        chunk = temp;
+        split = 1;
+      } else {
+        //End of buffer reached, don't split but simply enqueue it
+        //Set correct state and sequence numbers
+        // chunk->sequence.l2num = chcount;
+        // chunk->isLastL2Chunk = TRUE;
+        // chcount++;
+
+#ifdef ENABLE_STATISTICS
+        //update statistics
+        __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
+#endif //ENABLE_STATISTICS
+
+        //put it into send buffer
+	queue_out.push( chunk );
+        //prepare for next iteration
+        chunk = NULL;
+        split = 0;
+      }
+    } while(split);
+  }
+
+  free(rabintab);
+  free(rabinwintab);
+}
+
+void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) {
+  size_t preloading_buffer_seek = 0;
+  int fd = args->fd;
+  int r;
 
   chunk_t *temp = NULL;
   chunk_t *chunk = NULL;
-  obj::object_t<chunk_t*> chunk_obj;
   u32int * rabintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
   u32int * rabinwintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
   if(rabintab == NULL || rabinwintab == NULL) {
@@ -531,7 +636,7 @@ void SwanIntegratedPipeline(struct thread_args * args) {
       EXIT_TRACE("Input buffer size exceeds system maximum.\n");
     }
     //Allocate a new chunk and create a new memory buffer
-    chunk_obj = chunk = (chunk_t *)malloc(sizeof(chunk_t));
+    chunk = (chunk_t *)malloc(sizeof(chunk_t));
     if(chunk==NULL) EXIT_TRACE("Memory allocation failed.\n");
     r = leaf_call(mbuffer_create,&chunk->uncompressed_data, MAXBUF+bytes_left);
     if(r!=0) {
@@ -584,7 +689,7 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     if(bytes_left + bytes_read == 0) {
       leaf_call(mbuffer_free, &chunk->uncompressed_data);
       leaf_call(free, (void*)chunk);
-      chunk_obj = chunk = NULL;
+      chunk = NULL;
       break;
     }
     //Shrink buffer to actual size
@@ -597,26 +702,11 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     if(bytes_read == 0) {
 #ifdef ENABLE_STATISTICS
       //update statistics
-      stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
+      __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
 #endif //ENABLE_STATISTICS
 
       // Pthreads code will send to FragmentRefine here...
-
-#if 0
-      //Deduplicate
-      spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-      spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj);
-
-      //If chunk is unique compress & archive it.
-      spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
-
-      spawn(write_chunk_to_file_df, (obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-
-#else
-      spawn(sub_FragmentRefine_df, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj, (obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-#endif
-
-      ssync();
+      queue.push( chunk );
 
       //stop fetching from input buffer, terminate processing
       break;
@@ -624,74 +714,90 @@ void SwanIntegratedPipeline(struct thread_args * args) {
 
     //partition input block into fine-granular chunks
     int split;
-    ssync(); // TODO
-    assert( (chunk_t *)chunk_obj == chunk ); // TODO chunk_obj == obj
+    static int cnt;
+    cnt = 0;
     do {
       split = 0;
       //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
       if(ANCHOR_JUMP < chunk->uncompressed_data.n) {
-	  int offset = leaf_call(rabinseg,(uchar*)((chunk_t*)chunk_obj)->uncompressed_data.ptr + ANCHOR_JUMP, (int)((chunk_t*)chunk_obj)->uncompressed_data.n - ANCHOR_JUMP, rf_win_dataprocess, rabintab, rabinwintab);
-      //Did we find a split location?
+	  int offset = leaf_call(rabinseg,(uchar*)chunk->uncompressed_data.ptr + ANCHOR_JUMP, (int)chunk->uncompressed_data.n - ANCHOR_JUMP, rf_win_dataprocess, rabintab, rabinwintab);
+	  //Did we find a split location?
 	  if(offset == 0) {
-	    //Split found at the very beginning of the buffer (should never happen due to technical limitations)
-	    assert(0);
-	    split = 0;
-	  } else if(offset < (int)((chunk_t*)chunk_obj)->uncompressed_data.n) {
+	      //Split found at the very beginning of the buffer (should never happen due to technical limitations)
+	      assert(0);
+	      split = 0;
+	  } else if(offset + ANCHOR_JUMP < (int)chunk->uncompressed_data.n) {
 	    //Split found somewhere in the middle of the buffer
 	    //Allocate a new chunk and create a new memory buffer
 	    temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
 	    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
 
 	    //split it into two pieces
-	    r = leaf_call(mbuffer_split,&((chunk_t*)chunk_obj)->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+	    r = leaf_call(mbuffer_split,&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset + ANCHOR_JUMP);
 	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
 	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
 
     #ifdef ENABLE_STATISTICS
 	    //update statistics
-	    stats.nChunks[CHUNK_SIZE_TO_SLOT(((chunk_t*)chunk_obj)->uncompressed_data.n)]++;
+            __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
     #endif //ENABLE_STATISTICS
 
-#if 0
-	    //Deduplicate
-	    spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-	    spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj);
+	    queue.push( chunk );
 
-	    //If chunk is unique compress & archive it.
-	    spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
-
-	    spawn(write_chunk_to_file_df, (obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-#else
-	    spawn(sub_FragmentRefine_df, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj, (obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-#endif
-
-	    //prepare for next iteration
-	    /*chunk_obj =*/ // chunk = temp;
-	    call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, temp);
+	    chunk = temp;
 	    temp = NULL;
 	    split = 1;
 	  } else {
 	    //Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
 	    //This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
-	    split = 0;
+	    // temp = chunk;
+	    // temp = (chunk_t*)chunk_obj;
+	    /*chunk_obj =*/ //chunk = NULL;
+	    // call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, (chunk_t*)0);
+	      temp = chunk;
+	      chunk = 0;
+	      split = 0;
 	  }
       } else {
+	  temp = chunk;
+	  chunk = 0;
 	  split = 0;
       }
+      ++cnt;
     } while(split);
-    ssync(); // TODO
-    temp = (chunk_t*)chunk_obj;
-    chunk_obj = chunk = 0;
   }
 
   leaf_call(free, (void*)rabintab);
   leaf_call(free, (void*)rabinwintab);
 
-  leaf_call(close, (int)fd_out);
-
   return;
 }
 
+void SwanIntegratedPipeline(struct thread_args * args) {
+    obj::hyperqueue<chunk_t *> queue1;
+    obj::hyperqueue<chunk_t *> queue2;
+
+#if 0
+    spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
+    spawn( sub_FragmentRefine_df, args, (obj::popdep<chunk_t*>)queue1,
+	   (obj::pushdep<chunk_t*>)queue2 );
+    spawn( sub_DCW, args, (obj::popdep<chunk_t*>)queue2 );
+    ssync();
+#else
+    obj::hyperqueue<chunk_t *> wqueue;
+    spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
+    spawn( sub_FragmentRefine_df, args, (obj::popdep<chunk_t*>)queue1,
+	   (obj::pushdep<chunk_t*>)queue2 );
+    spawn( sub_DC, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
+    spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
+    ssync();
+#endif
+}
+
+/* 
+ * Integrate all computationally intensive pipeline
+ * stages to improve cache efficiency.
+ */
 void *SerialIntegratedPipeline(void * targs) {
   struct thread_args *args = (struct thread_args *)targs;
   size_t preloading_buffer_seek = 0;

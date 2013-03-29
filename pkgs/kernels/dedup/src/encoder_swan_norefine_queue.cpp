@@ -363,15 +363,20 @@ void sub_Compress_push_df(obj::inoutdep<chunk_t *>chunk, obj::pushdep<chunk_t *>
  *  - On miss add chunk to database
  *  - Returns chunk redundancy status
  */
+void sub_SHA1(chunk_t *chunk) {
+  assert(chunk!=NULL);
+  assert(chunk->uncompressed_data.ptr!=NULL);
+
+  // TODO: split off SHA1_Digest as separate stage?
+  SHA1_Digest( (const void*)chunk->uncompressed_data.ptr, chunk->uncompressed_data.n, (unsigned char *)(chunk->sha1));
+}
+
 void sub_Deduplicate(chunk_t *chunk) {
   int isDuplicate;
   chunk_t *entry;
 
   assert(chunk!=NULL);
   assert(chunk->uncompressed_data.ptr!=NULL);
-
-  // TODO: split off SHA1_Digest as separate stage?
-  SHA1_Digest( (const void*)chunk->uncompressed_data.ptr, chunk->uncompressed_data.n, (unsigned char *)(chunk->sha1));
 
   //Query database to determine whether we've seen the data chunk before
   entry = (chunk_t *)hashtable_search(cache, (void *)(chunk->sha1));
@@ -401,9 +406,13 @@ void sub_Deduplicate(chunk_t *chunk) {
   return;
 }
 
-void sub_Deduplicate_df(obj::inoutdep<chunk_t *>chunk, obj::cinoutdep<hashtable*>) {
+void sub_Deduplicate_df(obj::inoutdep<chunk_t *>chunk, obj::/*c*/inoutdep<hashtable*>) {
     //printf( "dedup: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
     leaf_call(sub_Deduplicate, (chunk_t*)chunk);
+}
+
+void sub_SHA1_df(obj::inoutdep<chunk_t *>chunk) {
+    leaf_call(sub_SHA1, (chunk_t*)chunk);
 }
 
 // void sub_FragmentRefine_df(obj::inoutdep<chunk_t *>chunk_in) 
@@ -441,8 +450,9 @@ void sub_DCW( struct thread_args * args,
 	// spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
 
 	//Deduplicate
+	spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
 	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-	      (obj::cinoutdep<hashtable*>)cache_obj);
+	      (obj::/*c*/inoutdep<hashtable*>)cache_obj);
 
 	//If chunk is unique compress & archive it.
 	spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
@@ -485,8 +495,9 @@ void sub_DC( struct thread_args * args,
 	// spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
 
 	//Deduplicate
+	spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
 	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-	      (obj::cinoutdep<hashtable*>)cache_obj);
+	      (obj::/*c*/inoutdep<hashtable*>)cache_obj);
 
 	//If chunk is unique compress & archive it.
 	spawn(sub_Compress_push_df, (obj::inoutdep<chunk_t*>)chunk_obj,
