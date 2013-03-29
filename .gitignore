@@ -1,2 +1,5 @@
 # Do not store input directories in the repository. They are huge and constant.
 inputs/
+pkgs/*/*/inst
+pkgs/*/*/obj
+pkgs/*/*/run
