@@ -433,6 +433,8 @@ void sub_DCW( struct thread_args * args,
 
     while( !queue.empty() ) {
 	chunk_t * chunk = queue.pop();
+	if( !chunk )
+	    break;
 
 	/// Rename (even if not necessary)
 	{
@@ -468,8 +470,9 @@ void sub_DCW( struct thread_args * args,
 // This should/could be prefixdep and push...
 // The push could be replaced by a reducer...
 // We would benefit from the ringbuffers and/or a peek window/bulk sync in queue
+template<template<typename U> class DepTy>
 void sub_DC( struct thread_args * args,
-	     obj::popdep<chunk_t*> queue_in,
+	     DepTy<chunk_t*> queue_in,
 	     obj::pushdep<chunk_t*> queue_out ) {
     obj::object_t<chunk_t *> chunk_obj;
 
@@ -478,6 +481,8 @@ void sub_DC( struct thread_args * args,
 
     while( !queue_in.empty() ) {
 	chunk_t * chunk = queue_in.pop();
+	if( !chunk )
+	    break;
 
 	/// Rename (even if not necessary)
 	{
@@ -508,6 +513,15 @@ void sub_DC( struct thread_args * args,
     ssync();
 }
 
+void sub_DC_rec( struct thread_args * args,
+		 obj::popdep<chunk_t*> queue_in,
+		 obj::pushdep<chunk_t*> queue_out ) {
+    while( !queue_in.empty() ) {
+	spawn( sub_DC<obj::prefixdep>, args, queue_in.prefix( 100 ), queue_out );
+    }
+    ssync();
+}
+
 void sub_W( struct thread_args * args,
 	    obj::popdep<chunk_t*> queue ) {
     int fd_out = leaf_call(create_output_file,conf->outfile);
@@ -521,8 +535,10 @@ void sub_W( struct thread_args * args,
     leaf_call(close, (int)fd_out);
 }
 
+
+template<template <typename U> class DepTy>
 void sub_FragmentRefine_df( struct thread_args * args,
-			    obj::popdep<chunk_t *> queue_in,
+			    DepTy<chunk_t *> queue_in,
 			    obj::pushdep<chunk_t *> queue_out) {
   const int qid = args->tid / MAX_THREADS_PER_QUEUE;
   int r;
@@ -537,6 +553,8 @@ void sub_FragmentRefine_df( struct thread_args * args,
 
   while ( !queue_in.empty() ) {
     chunk = queue_in.pop();
+    if( !chunk )
+	break;
 
     leaf_call(rabininit,rf_win, rabintab, rabinwintab);
 
@@ -596,6 +614,19 @@ void sub_FragmentRefine_df( struct thread_args * args,
 
   free(rabintab);
   free(rabinwintab);
+}
+
+void sub_FragmentRefine_rec( struct thread_args * args,
+			     obj::popdep<chunk_t *> queue_in,
+			     obj::pushdep<chunk_t *> queue_out) {
+    while( !queue_in.empty() ) {
+	errs() << "REC: not empty: " << *queue_in.get_version() << "\n";
+	spawn( sub_FragmentRefine_df<obj::prefixdep>, args,
+	       obj::prefixdep<chunk_t*>::create( queue_in.get_version(), 100, 0 ),
+	       queue_out );
+    }
+    ssync();
+    errs() << "Refine_rec done\n";
 }
 
 void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) {
@@ -779,18 +810,29 @@ void SwanIntegratedPipeline(struct thread_args * args) {
 
 #if 0
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
-    spawn( sub_FragmentRefine_df, args, (obj::popdep<chunk_t*>)queue1,
+    spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
 	   (obj::pushdep<chunk_t*>)queue2 );
     spawn( sub_DCW, args, (obj::popdep<chunk_t*>)queue2 );
     ssync();
 #else
+#if 0
     obj::hyperqueue<chunk_t *> wqueue;
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
-    spawn( sub_FragmentRefine_df, args, (obj::popdep<chunk_t*>)queue1,
+    spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
 	   (obj::pushdep<chunk_t*>)queue2 );
-    spawn( sub_DC, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
+    spawn( sub_DC<obj::popdep>, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
     spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
     ssync();
+#else
+    obj::hyperqueue<chunk_t *> wqueue;
+    spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
+    spawn( sub_FragmentRefine_rec, args, (obj::popdep<chunk_t*>)queue1,
+	   (obj::pushdep<chunk_t*>)queue2 );
+    // spawn( sub_DC_rec, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
+    spawn( sub_DC<obj::popdep>, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
+    spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
+    ssync();
+#endif
 #endif
 }
 
