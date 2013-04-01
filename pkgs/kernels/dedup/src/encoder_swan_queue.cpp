@@ -517,7 +517,7 @@ void sub_DC_rec( struct thread_args * args,
 		 obj::popdep<chunk_t*> queue_in,
 		 obj::pushdep<chunk_t*> queue_out ) {
     while( !queue_in.empty() ) {
-	spawn( sub_DC<obj::prefixdep>, args, queue_in.prefix( 100 ), queue_out );
+	spawn( sub_DC<obj::prefixdep>, args, queue_in.prefix( 4095 ), queue_out );
     }
     ssync();
 }
@@ -620,13 +620,12 @@ void sub_FragmentRefine_rec( struct thread_args * args,
 			     obj::popdep<chunk_t *> queue_in,
 			     obj::pushdep<chunk_t *> queue_out) {
     while( !queue_in.empty() ) {
-	errs() << "REC: not empty: " << *queue_in.get_version() << "\n";
+	// errs() << "REC: not empty: " << *queue_in.get_version() << "\n";
 	spawn( sub_FragmentRefine_df<obj::prefixdep>, args,
-	       obj::prefixdep<chunk_t*>::create( queue_in.get_version(), 100, 0 ),
-	       queue_out );
+	       queue_in.prefix( 1 ), queue_out );
     }
     ssync();
-    errs() << "Refine_rec done\n";
+    // errs() << "Refine_rec done\n";
 }
 
 void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) {
@@ -805,10 +804,10 @@ void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) 
 }
 
 void SwanIntegratedPipeline(struct thread_args * args) {
-    obj::hyperqueue<chunk_t *> queue1;
-    obj::hyperqueue<chunk_t *> queue2;
-
 #if 0
+    obj::hyperqueue<chunk_t *> queue1;
+    obj::hyperqueue<chunk_t *> queue2( 4096 );
+
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
 	   (obj::pushdep<chunk_t*>)queue2 );
@@ -816,7 +815,10 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     ssync();
 #else
 #if 0
+    obj::hyperqueue<chunk_t *> queue1;
+    obj::hyperqueue<chunk_t *> queue2( 4096 );
     obj::hyperqueue<chunk_t *> wqueue;
+
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
 	   (obj::pushdep<chunk_t*>)queue2 );
@@ -824,7 +826,10 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
     ssync();
 #else
-    obj::hyperqueue<chunk_t *> wqueue;
+    obj::hyperqueue<chunk_t *> queue1;
+    obj::hyperqueue<chunk_t *> queue2( 4096 );
+    obj::hyperqueue<chunk_t *> wqueue( 4096 );
+
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_FragmentRefine_rec, args, (obj::popdep<chunk_t*>)queue1,
 	   (obj::pushdep<chunk_t*>)queue2 );
