@@ -44,6 +44,10 @@ extern "C" {
 #include "swan/wf_interface.h"
 #include "swan/queue/queue_t.h"
 #include "binheap.h"
+
+#define QSIZE1 15
+#define QSIZE2 4095
+#define QSIZE3 3
 #endif
 
 #ifdef ENABLE_GZIP_COMPRESSION
@@ -415,6 +419,97 @@ void sub_SHA1_df(obj::inoutdep<chunk_t *>chunk) {
     leaf_call(sub_SHA1, (chunk_t*)chunk);
 }
 
+void sub_SHA1_pipe_df(obj::prefixdep<chunk_t *> queue_in,
+		      obj::suffixdep<chunk_t *> queue_out ) {
+    while( !queue_in.empty() ) {
+	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
+	    = queue_in.get_slice_upto( QSIZE2, 0 );
+	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
+	    = queue_out.get_write_slice( QSIZE2 );
+
+	for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	    chunk_t * chunk = rslice.pop();
+	    if( !chunk )
+		break;
+
+	    leaf_call(sub_SHA1, chunk);
+	    wslice.push( chunk );
+	} 
+	rslice.commit();
+	wslice.commit();
+    }
+}
+
+void sub_SHA1_pipe(obj::popdep<chunk_t *> queue_in,
+		   obj::pushdep<chunk_t *> queue_out ) {
+    while( !queue_in.empty() ) {
+	spawn( sub_SHA1_pipe_df, queue_in.prefix( QSIZE2 ),
+	       queue_out.suffix( QSIZE2 ) );
+    }
+    ssync();
+}
+
+void sub_Deduplicate_pipe_df(obj::prefixdep<chunk_t *> queue_in,
+			     obj::suffixdep<chunk_t *> queue_out ) {
+    while( !queue_in.empty() ) {
+	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
+	    = queue_in.get_slice_upto( QSIZE2, 0 );
+	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
+	    = queue_out.get_write_slice( QSIZE2 );
+
+	for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	    chunk_t * chunk = rslice.pop();
+	    if( !chunk )
+		break;
+
+	    leaf_call(sub_Deduplicate, chunk);
+	    wslice.push( chunk );
+	} 
+	rslice.commit();
+	wslice.commit();
+    }
+}
+
+void sub_Deduplicate_pipe(obj::popdep<chunk_t *> queue_in,
+			  obj::pushdep<chunk_t *> queue_out ) {
+    while( !queue_in.empty() ) {
+	spawn( sub_Deduplicate_pipe_df, queue_in.prefix( QSIZE2 ),
+	       queue_out.suffix( QSIZE2 ) );
+    }
+    ssync();
+}
+
+void sub_Compress_pipe_df(obj::prefixdep<chunk_t *> queue_in,
+			  obj::suffixdep<chunk_t *> queue_out ) {
+    while( !queue_in.empty() ) {
+	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
+	    = queue_in.get_slice_upto( QSIZE2, 0 );
+	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
+	    = queue_out.get_write_slice( QSIZE2 );
+
+	for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	    chunk_t * chunk = rslice.pop();
+	    if( !chunk )
+		break;
+
+	    leaf_call(sub_Compress, chunk);
+	    wslice.push( chunk );
+	} 
+	rslice.commit();
+	wslice.commit();
+    }
+}
+
+void sub_Compress_pipe(obj::popdep<chunk_t *> queue_in,
+		       obj::pushdep<chunk_t *> queue_out ) {
+    while( !queue_in.empty() ) {
+	spawn( sub_Compress_pipe_df, queue_in.prefix( QSIZE2 ),
+	       queue_out.suffix( QSIZE2 ) );
+    }
+    ssync();
+}
+
+
 // void sub_FragmentRefine_df(obj::inoutdep<chunk_t *>chunk_in) 
 
 void set_chunk_obj( obj::outdep<chunk_t*> chunk_obj, chunk_t * temp) {
@@ -480,44 +575,65 @@ void sub_DC( struct thread_args * args,
     cache_obj = cache;
 
     while( !queue_in.empty() ) {
-	chunk_t * chunk = queue_in.pop();
-	if( !chunk )
-	    break;
+	// TODO: introduce read/write slice
+	// TODO: introduce suffixdep
+	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
+	    = queue_in.get_slice_upto( QSIZE2, 0 );
 
-	/// Rename (even if not necessary)
-	{
-	    obj::outdep<chunk_t *> obj_ext
-		= obj::outdep<chunk_t*>::create( chunk_obj.get_version() );
-	    obj::outdep<chunk_t *> obj_int;
-	    obj::outdep<chunk_t *>::dep_tags tags;
+	for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	    chunk_t * chunk = rslice.pop();
+	    if( !chunk )
+		break;
 
-	    obj::rename<obj::outdep<chunk_t *>::metadata_t, chunk_t *>( 
-		obj_ext, obj_int, tags );
+	    /// Rename (even if not necessary)
+	    {
+		obj::outdep<chunk_t *> obj_ext
+		    = obj::outdep<chunk_t*>::create( chunk_obj.get_version() );
+		obj::outdep<chunk_t *> obj_int;
+		obj::outdep<chunk_t *>::dep_tags tags;
 
-	    chunk_obj = chunk;
+		obj::rename<obj::outdep<chunk_t *>::metadata_t, chunk_t *>( 
+		    obj_ext, obj_int, tags );
+
+		chunk_obj = chunk;
+	    }
+
+	    // spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
+
+	    //Deduplicate
+	    spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
+	    spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
+		  (obj::/*c*/inoutdep<hashtable*>)cache_obj);
+
+	    //If chunk is unique compress & archive it.
+	    spawn(sub_Compress_push_df, (obj::inoutdep<chunk_t*>)chunk_obj,
+		  queue_out );
 	}
-
-	// spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
-
-	//Deduplicate
-	spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-	      (obj::/*c*/inoutdep<hashtable*>)cache_obj);
-
-	//If chunk is unique compress & archive it.
-	spawn(sub_Compress_push_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-	      queue_out );
-
-	// queue_out.push( chunk );
+	rslice.commit();
     }
     ssync();
+}
+
+void sub_SDC( chunk_t * chunk, obj::pushdep<chunk_t*> queue_out ) {
+  static mutex lock;
+
+  //Deduplicate
+  leaf_call(sub_SHA1, chunk);
+  lock.lock();
+  leaf_call(sub_Deduplicate, chunk);
+  lock.unlock();
+
+  //If chunk is unique compress & archive it.
+  leaf_call( sub_Compress, chunk );
+
+  queue_out.push( chunk );
 }
 
 void sub_DC_rec( struct thread_args * args,
 		 obj::popdep<chunk_t*> queue_in,
 		 obj::pushdep<chunk_t*> queue_out ) {
     while( !queue_in.empty() ) {
-	spawn( sub_DC<obj::prefixdep>, args, queue_in.prefix( 4095 ), queue_out );
+	spawn( sub_DC<obj::prefixdep>, args, queue_in.prefix( QSIZE2 ), queue_out );
     }
     ssync();
 }
@@ -527,9 +643,18 @@ void sub_W( struct thread_args * args,
     int fd_out = leaf_call(create_output_file,conf->outfile);
 
     while( !queue.empty() ) {
-	chunk_t * chunk = queue.pop();
+      chunk_t * chunk = queue.pop();
+      leaf_call(write_chunk_to_file, fd_out, chunk);
+      /*
+      obj::read_slice<obj::queue_metadata, chunk_t*> rslice
+	          = queue.get_slice_upto( QSIZE3, 0 );
+      for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	chunk_t * chunk = rslice.pop();
 
 	leaf_call(write_chunk_to_file, fd_out, chunk);
+      }
+      rslice.commit();
+      */
     }
 
     leaf_call(close, (int)fd_out);
@@ -550,6 +675,9 @@ void sub_FragmentRefine_df( struct thread_args * args,
   if(rabintab == NULL || rabinwintab == NULL) {
     EXIT_TRACE("Memory allocation failed.\n");
   }
+
+  obj::write_slice<obj::queue_metadata,chunk_t *> wslice
+      = queue_out.get_write_slice( QSIZE2 );
 
   while ( !queue_in.empty() ) {
     chunk = queue_in.pop();
@@ -586,7 +714,10 @@ void sub_FragmentRefine_df( struct thread_args * args,
 #endif //ENABLE_STATISTICS
 
         //put it into send buffer
-	queue_out.push( chunk );
+	if( !wslice.push( chunk ) ) {
+	    wslice.commit();
+	    wslice = queue_out.get_write_slice( QSIZE2 );
+	}
 
         //prepare for next iteration
         chunk = temp;
@@ -604,13 +735,93 @@ void sub_FragmentRefine_df( struct thread_args * args,
 #endif //ENABLE_STATISTICS
 
         //put it into send buffer
-	queue_out.push( chunk );
+	if( !wslice.push( chunk ) ) {
+	    wslice.commit();
+	    wslice = queue_out.get_write_slice( QSIZE2 );
+	}
         //prepare for next iteration
         chunk = NULL;
         split = 0;
       }
     } while(split);
   }
+
+  wslice.commit();
+
+  free(rabintab);
+  free(rabinwintab);
+}
+
+void sub_FragmentRefine_df2( struct thread_args * args,
+			     chunk_t * chunk,
+			     obj::pushdep<chunk_t *> wqueue) {
+  const int qid = args->tid / MAX_THREADS_PER_QUEUE;
+  int r;
+
+  chunk_t *temp;
+  u32int * rabintab = malloc(256*sizeof rabintab[0]);
+  u32int * rabinwintab = malloc(256*sizeof rabintab[0]);
+  if(rabintab == NULL || rabinwintab == NULL) {
+    EXIT_TRACE("Memory allocation failed.\n");
+  }
+
+  leaf_call(rabininit,rf_win, rabintab, rabinwintab);
+
+  int split;
+  do {
+    //Find next anchor with Rabin fingerprint
+    int offset = leaf_call(rabinseg, (uchar*)chunk->uncompressed_data.ptr, (int)chunk->uncompressed_data.n, rf_win, rabintab, rabinwintab);
+    //Can we split the buffer?
+    if(offset < chunk->uncompressed_data.n) {
+      //Allocate a new chunk and create a new memory buffer
+      temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
+      if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
+      temp->header.state = chunk->header.state;
+      // temp->sequence.l1num = chunk->sequence.l1num;
+
+      //split it into two pieces
+      r = leaf_call(mbuffer_split,&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+      if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
+
+      //Set correct state and sequence numbers
+      // chunk->sequence.l2num = chcount;
+      // chunk->isLastL2Chunk = FALSE;
+      // chcount++;
+
+#ifdef ENABLE_STATISTICS
+      //update statistics
+      // thread_stats->nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
+      __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
+#endif //ENABLE_STATISTICS
+
+      //put it into send buffer
+      spawn( sub_SDC, chunk, wqueue );
+
+      //prepare for next iteration
+      chunk = temp;
+      split = 1;
+    } else {
+      //End of buffer reached, don't split but simply enqueue it
+      //Set correct state and sequence numbers
+      // chunk->sequence.l2num = chcount;
+      // chunk->isLastL2Chunk = TRUE;
+      // chcount++;
+
+#ifdef ENABLE_STATISTICS
+      //update statistics
+      __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
+#endif //ENABLE_STATISTICS
+
+      //put it into send buffer
+      spawn( sub_SDC, chunk, wqueue );
+
+      //prepare for next iteration
+      chunk = NULL;
+      split = 0;
+    }
+  } while(split);
+
+  ssync();
 
   free(rabintab);
   free(rabinwintab);
@@ -620,12 +831,10 @@ void sub_FragmentRefine_rec( struct thread_args * args,
 			     obj::popdep<chunk_t *> queue_in,
 			     obj::pushdep<chunk_t *> queue_out) {
     while( !queue_in.empty() ) {
-	// errs() << "REC: not empty: " << *queue_in.get_version() << "\n";
 	spawn( sub_FragmentRefine_df<obj::prefixdep>, args,
 	       queue_in.prefix( 1 ), queue_out );
     }
     ssync();
-    // errs() << "Refine_rec done\n";
 }
 
 void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) {
@@ -803,10 +1012,189 @@ void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) 
   return;
 }
 
+void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_out) {
+  size_t preloading_buffer_seek = 0;
+  int fd = args->fd;
+  int r;
+
+  chunk_t *temp = NULL;
+  chunk_t *chunk = NULL;
+  u32int * rabintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
+  u32int * rabinwintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
+  if(rabintab == NULL || rabinwintab == NULL) {
+    EXIT_TRACE("Memory allocation failed.\n");
+  }
+
+  rf_win_dataprocess = 0;
+  rabininit(rf_win_dataprocess, rabintab, rabinwintab);
+
+  //Sanity check
+  if(MAXBUF < 8 * ANCHOR_JUMP) {
+    printf("WARNING: I/O buffer size is very small. Performance degraded.\n");
+    fflush(NULL);
+  }
+
+  //read from input file / buffer
+  while (1) {
+    size_t bytes_left; //amount of data left over in last_mbuffer from previous iteration
+
+    //Check how much data left over from previous iteration resp. create an initial chunk
+    if(temp != NULL) {
+      bytes_left = temp->uncompressed_data.n;
+    } else {
+      bytes_left = 0;
+    }
+
+    //Make sure that system supports new buffer size
+    if(MAXBUF+bytes_left > SSIZE_MAX) {
+      EXIT_TRACE("Input buffer size exceeds system maximum.\n");
+    }
+    //Allocate a new chunk and create a new memory buffer
+    chunk = (chunk_t *)malloc(sizeof(chunk_t));
+    if(chunk==NULL) EXIT_TRACE("Memory allocation failed.\n");
+    r = leaf_call(mbuffer_create,&chunk->uncompressed_data, MAXBUF+bytes_left);
+    if(r!=0) {
+      EXIT_TRACE("Unable to initialize memory buffer.\n");
+    }
+    chunk->header.state = CHUNK_STATE_UNCOMPRESSED;
+    if(bytes_left > 0) {
+      //FIXME: Short-circuit this if no more data available
+
+      //"Extension" of existing buffer, copy sequence number and left over data to beginning of new buffer
+      //NOTE: We cannot safely extend the current memory region because it has already been given to another thread
+      memcpy(chunk->uncompressed_data.ptr, temp->uncompressed_data.ptr, temp->uncompressed_data.n);
+      leaf_call(mbuffer_free,&temp->uncompressed_data);
+      leaf_call(free, (void*)temp);
+      temp = NULL;
+    }
+    //Read data until buffer full
+    size_t bytes_read=0;
+    if(conf->preloading) {
+      size_t max_read = MIN(MAXBUF, args->input_file.size-preloading_buffer_seek);
+      memcpy((char*)chunk->uncompressed_data.ptr+bytes_left, (char*)args->input_file.buffer+preloading_buffer_seek, max_read);
+      bytes_read = max_read;
+      preloading_buffer_seek += max_read;
+    } else {
+      while(bytes_read < MAXBUF) {
+        r = leaf_call(read, fd, (void*)((char*)chunk->uncompressed_data.ptr+bytes_left+bytes_read), (size_t)MAXBUF-bytes_read);
+        if(r<0) switch(errno) {
+          case EAGAIN:
+            EXIT_TRACE("I/O error: No data available\n");break;
+          case EBADF:
+            EXIT_TRACE("I/O error: Invalid file descriptor\n");break;
+          case EFAULT:
+            EXIT_TRACE("I/O error: Buffer out of range\n");break;
+          case EINTR:
+            EXIT_TRACE("I/O error: Interruption\n");break;
+          case EINVAL:
+            EXIT_TRACE("I/O error: Unable to read from file descriptor\n");break;
+          case EIO:
+            EXIT_TRACE("I/O error: Generic I/O error\n");break;
+          case EISDIR:
+            EXIT_TRACE("I/O error: Cannot read from a directory\n");break;
+          default:
+            EXIT_TRACE("I/O error: Unrecognized error\n");break;
+        }
+        if(r==0) break;
+        bytes_read += r;
+      }
+    }
+    //No data left over from last iteration and also nothing new read in, simply clean up and quit
+    if(bytes_left + bytes_read == 0) {
+      leaf_call(mbuffer_free, &chunk->uncompressed_data);
+      leaf_call(free, (void*)chunk);
+      chunk = NULL;
+      break;
+    }
+    //Shrink buffer to actual size
+    if(bytes_left+bytes_read < chunk->uncompressed_data.n) {
+      r = leaf_call(mbuffer_realloc, &chunk->uncompressed_data, bytes_left+bytes_read);
+      assert(r == 0);
+    }
+
+    //Check whether any new data was read in, process last chunk if not
+    if(bytes_read == 0) {
+#ifdef ENABLE_STATISTICS
+      //update statistics
+      __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
+#endif //ENABLE_STATISTICS
+
+      // Pthreads code will send to FragmentRefine here...
+      // queue.push( chunk );
+      spawn( sub_FragmentRefine_df2, args, chunk, queue_out );
+
+      //stop fetching from input buffer, terminate processing
+      break;
+    }
+
+    //partition input block into fine-granular chunks
+    int split;
+    static int cnt;
+    cnt = 0;
+    do {
+      split = 0;
+      //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
+      if(ANCHOR_JUMP < chunk->uncompressed_data.n) {
+	  int offset = leaf_call(rabinseg,(uchar*)chunk->uncompressed_data.ptr + ANCHOR_JUMP, (int)chunk->uncompressed_data.n - ANCHOR_JUMP, rf_win_dataprocess, rabintab, rabinwintab);
+	  //Did we find a split location?
+	  if(offset == 0) {
+	      //Split found at the very beginning of the buffer (should never happen due to technical limitations)
+	      assert(0);
+	      split = 0;
+	  } else if(offset + ANCHOR_JUMP < (int)chunk->uncompressed_data.n) {
+	    //Split found somewhere in the middle of the buffer
+	    //Allocate a new chunk and create a new memory buffer
+	    temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
+	    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
+
+	    //split it into two pieces
+	    r = leaf_call(mbuffer_split,&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset + ANCHOR_JUMP);
+	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
+	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
+
+    #ifdef ENABLE_STATISTICS
+	    //update statistics
+            __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
+    #endif //ENABLE_STATISTICS
+
+	    // queue.push( chunk );
+	    spawn( sub_FragmentRefine_df2, args, chunk, queue_out );
+
+	    chunk = temp;
+	    temp = NULL;
+	    split = 1;
+	  } else {
+	    //Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
+	    //This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
+	    // temp = chunk;
+	    // temp = (chunk_t*)chunk_obj;
+	    /*chunk_obj =*/ //chunk = NULL;
+	    // call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, (chunk_t*)0);
+	      temp = chunk;
+	      chunk = 0;
+	      split = 0;
+	  }
+      } else {
+	  temp = chunk;
+	  chunk = 0;
+	  split = 0;
+      }
+      ++cnt;
+    } while(split);
+  }
+
+  ssync();
+
+  leaf_call(free, (void*)rabintab);
+  leaf_call(free, (void*)rabinwintab);
+
+  return;
+}
+
 void SwanIntegratedPipeline(struct thread_args * args) {
 #if 0
-    obj::hyperqueue<chunk_t *> queue1;
-    obj::hyperqueue<chunk_t *> queue2( 4096 );
+    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
+    obj::hyperqueue<chunk_t *> queue2( QSIZE2 );
 
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
@@ -815,9 +1203,9 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     ssync();
 #else
 #if 0
-    obj::hyperqueue<chunk_t *> queue1;
-    obj::hyperqueue<chunk_t *> queue2( 4096 );
-    obj::hyperqueue<chunk_t *> wqueue;
+    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
+    obj::hyperqueue<chunk_t *> queue2( QSIZE2 );
+    obj::hyperqueue<chunk_t *> wqueue( QSIZE2 );
 
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
@@ -826,17 +1214,30 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
     ssync();
 #else
-    obj::hyperqueue<chunk_t *> queue1;
-    obj::hyperqueue<chunk_t *> queue2( 4096 );
-    obj::hyperqueue<chunk_t *> wqueue( 4096 );
+#if 0
+    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
+    obj::hyperqueue<chunk_t *> queue2( QSIZE2 );
+    obj::hyperqueue<chunk_t *> queue2a( QSIZE2 );
+    obj::hyperqueue<chunk_t *> queue2b( QSIZE2 );
+    obj::hyperqueue<chunk_t *> wqueue( QSIZE3 );
 
     spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_FragmentRefine_rec, args, (obj::popdep<chunk_t*>)queue1,
-	   (obj::pushdep<chunk_t*>)queue2 );
+	   (obj::pushdep<chunk_t*>)queue2a );
+    spawn( sub_SHA1_pipe, (obj::popdep<chunk_t*>)queue2a, (obj::pushdep<chunk_t*>)queue2b );
+    spawn( sub_Deduplicate_pipe, (obj::popdep<chunk_t*>)queue2b, (obj::pushdep<chunk_t*>)queue2 );
+    spawn( sub_Compress_pipe, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
     // spawn( sub_DC_rec, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
-    spawn( sub_DC<obj::popdep>, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
+    // spawn( sub_DC<obj::popdep>, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
     spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
     ssync();
+#else
+    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
+
+    spawn( sub_Fragment_df2, args, (obj::pushdep<chunk_t*>)queue1 );
+    spawn( sub_W, args, (obj::popdep<chunk_t*>)queue1 );
+    ssync();
+#endif
 #endif
 #endif
 }
