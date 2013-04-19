@@ -45,9 +45,10 @@ extern "C" {
 #include "swan/queue/queue_t.h"
 #include "binheap.h"
 
-#define QSIZE1 15
+#define QSIZE1 1
 #define QSIZE2 4095
-#define QSIZE3 3
+
+#define CINOUT 0
 #endif
 
 #ifdef ENABLE_GZIP_COMPRESSION
@@ -376,41 +377,61 @@ void sub_SHA1(chunk_t *chunk) {
 }
 
 void sub_Deduplicate(chunk_t *chunk) {
-  int isDuplicate;
-  chunk_t *entry;
+#if !CINOUT
+    static mcs_mutex lock;
+    mcs_mutex::node lock_node;
+#endif
 
-  assert(chunk!=NULL);
-  assert(chunk->uncompressed_data.ptr!=NULL);
+    int isDuplicate;
+    chunk_t *entry;
 
-  //Query database to determine whether we've seen the data chunk before
-  entry = (chunk_t *)hashtable_search(cache, (void *)(chunk->sha1));
-  isDuplicate = (entry != NULL);
-  chunk->header.isDuplicate = isDuplicate;
-  if (!isDuplicate) {
-    // Cache miss: Create entry in hash table and forward data to compression stage
-    //NOTE: chunk->compressed_data.buffer will be computed in compression stage
-    if (hashtable_insert(cache, (void *)(chunk->sha1), (void *)chunk) == 0) {
-      EXIT_TRACE("hashtable_insert failed");
+    assert(chunk!=NULL);
+    assert(chunk->uncompressed_data.ptr!=NULL);
+
+    //Query database to determine whether we've seen the data chunk before
+#if !CINOUT
+    lock.lock( &lock_node );
+#endif
+    entry = (chunk_t *)hashtable_search(cache, (void *)(chunk->sha1));
+    isDuplicate = (entry != NULL);
+    chunk->header.isDuplicate = isDuplicate;
+    if (!isDuplicate) {
+	// Cache miss: Create entry in hash table and forward data to compression stage
+	//NOTE: chunk->compressed_data.buffer will be computed in compression stage
+	if (hashtable_insert(cache, (void *)(chunk->sha1), (void *)chunk) == 0) {
+	    EXIT_TRACE("hashtable_insert failed");
+	}
+#if !CINOUT
+        lock.unlock( &lock_node );
+#endif
+    } else {
+#if !CINOUT
+        lock.unlock( &lock_node );
+#endif
+	// Cache hit: Skipping compression stage
+	chunk->compressed_data_ref = entry;
+	mbuffer_free(&chunk->uncompressed_data);
     }
-  } else {
-    // Cache hit: Skipping compression stage
-    chunk->compressed_data_ref = entry;
-    mbuffer_free(&chunk->uncompressed_data);
-  }
 
 #ifdef ENABLE_STATISTICS
-      // HV: TODO: use reducer on stats ...
-      if(isDuplicate) {
+    // HV: TODO: use reducer on stats ...
+    if(isDuplicate) {
         stats.nDuplicates++;
-      } else {
+    } else {
         stats.total_dedup += chunk->uncompressed_data.n;
-      }
+    }
 #endif //ENABLE_STATISTICS
 
-  return;
+    return;
 }
 
-void sub_Deduplicate_df(obj::inoutdep<chunk_t *>chunk, obj::/*c*/inoutdep<hashtable*>) {
+void sub_Deduplicate_df(obj::inoutdep<chunk_t *>chunk,
+#if CINOUT
+			obj::cinoutdep<hashtable*>
+#else
+			obj::inoutdep<hashtable*>
+#endif
+    ) {
     //printf( "dedup: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
     leaf_call(sub_Deduplicate, (chunk_t*)chunk);
 }
@@ -419,221 +440,55 @@ void sub_SHA1_df(obj::inoutdep<chunk_t *>chunk) {
     leaf_call(sub_SHA1, (chunk_t*)chunk);
 }
 
-void sub_SHA1_pipe_df(obj::prefixdep<chunk_t *> queue_in,
-		      obj::suffixdep<chunk_t *> queue_out ) {
-    while( !queue_in.empty() ) {
-	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
-	    = queue_in.get_slice_upto( QSIZE2, 0 );
-	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
-	    = queue_out.get_write_slice( QSIZE2 );
-
-	for( size_t i=0; i < rslice.get_npops(); ++i ) {
-	    chunk_t * chunk = rslice.pop();
-	    if( !chunk )
-		break;
-
-	    leaf_call(sub_SHA1, chunk);
-	    wslice.push( chunk );
-	} 
-	rslice.commit();
-	wslice.commit();
-    }
-}
-
-void sub_SHA1_pipe(obj::popdep<chunk_t *> queue_in,
-		   obj::pushdep<chunk_t *> queue_out ) {
-    while( !queue_in.empty() ) {
-	spawn( sub_SHA1_pipe_df, queue_in.prefix( QSIZE2 ),
-	       queue_out.suffix( QSIZE2 ) );
-    }
-    ssync();
-}
-
-void sub_Deduplicate_pipe_df(obj::prefixdep<chunk_t *> queue_in,
-			     obj::suffixdep<chunk_t *> queue_out ) {
-    while( !queue_in.empty() ) {
-	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
-	    = queue_in.get_slice_upto( QSIZE2, 0 );
-	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
-	    = queue_out.get_write_slice( QSIZE2 );
-
-	for( size_t i=0; i < rslice.get_npops(); ++i ) {
-	    chunk_t * chunk = rslice.pop();
-	    if( !chunk )
-		break;
-
-	    leaf_call(sub_Deduplicate, chunk);
-	    wslice.push( chunk );
-	} 
-	rslice.commit();
-	wslice.commit();
-    }
-}
-
-void sub_Deduplicate_pipe(obj::popdep<chunk_t *> queue_in,
-			  obj::pushdep<chunk_t *> queue_out ) {
-    while( !queue_in.empty() ) {
-	spawn( sub_Deduplicate_pipe_df, queue_in.prefix( QSIZE2 ),
-	       queue_out.suffix( QSIZE2 ) );
-    }
-    ssync();
-}
-
-void sub_Compress_pipe_df(obj::prefixdep<chunk_t *> queue_in,
-			  obj::suffixdep<chunk_t *> queue_out ) {
-    while( !queue_in.empty() ) {
-	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
-	    = queue_in.get_slice_upto( QSIZE2, 0 );
-	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
-	    = queue_out.get_write_slice( QSIZE2 );
-
-	for( size_t i=0; i < rslice.get_npops(); ++i ) {
-	    chunk_t * chunk = rslice.pop();
-	    if( !chunk )
-		break;
-
-	    leaf_call(sub_Compress, chunk);
-	    wslice.push( chunk );
-	} 
-	rslice.commit();
-	wslice.commit();
-    }
-}
-
-void sub_Compress_pipe(obj::popdep<chunk_t *> queue_in,
-		       obj::pushdep<chunk_t *> queue_out ) {
-    while( !queue_in.empty() ) {
-	spawn( sub_Compress_pipe_df, queue_in.prefix( QSIZE2 ),
-	       queue_out.suffix( QSIZE2 ) );
-    }
-    ssync();
-}
-
-
-// void sub_FragmentRefine_df(obj::inoutdep<chunk_t *>chunk_in) 
-
 void set_chunk_obj( obj::outdep<chunk_t*> chunk_obj, chunk_t * temp) {
     chunk_obj = temp;
 }
 
-void sub_DCW( struct thread_args * args,
-	      obj::popdep<chunk_t*> queue ) {
-    obj::object_t<chunk_t *> chunk_obj;
-
-    obj::object_t<int> fd_out;
-    fd_out = leaf_call(create_output_file,conf->outfile);
-
-    obj::unversioned<hashtable *> cache_obj;
-    cache_obj = cache;
-
-    while( !queue.empty() ) {
-	chunk_t * chunk = queue.pop();
-	if( !chunk )
-	    break;
-
-	/// Rename (even if not necessary)
-	{
-	    obj::outdep<chunk_t *> obj_ext
-		= obj::outdep<chunk_t*>::create( chunk_obj.get_version() );
-	    obj::outdep<chunk_t *> obj_int;
-	    obj::outdep<chunk_t *>::dep_tags tags;
-
-	    obj::rename<obj::outdep<chunk_t *>::metadata_t, chunk_t *>( 
-		obj_ext, obj_int, tags );
-
-	    chunk_obj = chunk;
-	}
-
-	// spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
-
-	//Deduplicate
-	spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-	      (obj::/*c*/inoutdep<hashtable*>)cache_obj);
-
-	//If chunk is unique compress & archive it.
-	spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
-
-	spawn(write_chunk_to_file_df,(obj::inoutdep<int>)fd_out,
-	      (obj::indep<chunk_t*>)chunk_obj);
-    }
-    ssync();
-
-    leaf_call(close, (int)fd_out);
-}
-
-// This should/could be prefixdep and push...
-// The push could be replaced by a reducer...
-// We would benefit from the ringbuffers and/or a peek window/bulk sync in queue
-template<template<typename U> class DepTy>
-void sub_DC( struct thread_args * args,
-	     DepTy<chunk_t*> queue_in,
-	     obj::pushdep<chunk_t*> queue_out ) {
+void sub_SDCq( obj::popdep<chunk_t*> queue_in, obj::pushdep<chunk_t*> queue_out ) {
     obj::object_t<chunk_t *> chunk_obj;
 
     obj::unversioned<hashtable *> cache_obj;
     cache_obj = cache;
 
     while( !queue_in.empty() ) {
-	// TODO: introduce read/write slice
-	// TODO: introduce suffixdep
 	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
 	    = queue_in.get_slice_upto( QSIZE2, 0 );
-
+	// obj::write_slice<obj::queue_metadata, chunk_t*> wslice
+	    // = queue_out.get_write_slice( rslice.get_npops() );
 	for( size_t i=0; i < rslice.get_npops(); ++i ) {
 	    chunk_t * chunk = rslice.pop();
-	    if( !chunk )
-		break;
 
-	    /// Rename (even if not necessary)
-	    {
-		obj::outdep<chunk_t *> obj_ext
-		    = obj::outdep<chunk_t*>::create( chunk_obj.get_version() );
-		obj::outdep<chunk_t *> obj_int;
-		obj::outdep<chunk_t *>::dep_tags tags;
+/*
+//Deduplicate
+leaf_call(sub_SHA1, chunk);
+leaf_call(sub_Deduplicate, chunk);
 
-		obj::rename<obj::outdep<chunk_t *>::metadata_t, chunk_t *>( 
-		    obj_ext, obj_int, tags );
+//If chunk is unique compress & archive it.
+if( !chunk->header.isDuplicate )
+leaf_call( sub_Compress, chunk );
 
-		chunk_obj = chunk;
-	    }
+wslice.push( chunk );
+*/
 
-	    // spawn( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
+	    call( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
 
 	    //Deduplicate
 	    spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
 	    spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-		  (obj::/*c*/inoutdep<hashtable*>)cache_obj);
+#if CINOUT
+		  (obj::cinoutdep<hashtable*>)cache_obj
+#else
+		  (obj::inoutdep<hashtable*>)cache_obj
+#endif
+		);
 
 	    //If chunk is unique compress & archive it.
 	    spawn(sub_Compress_push_df, (obj::inoutdep<chunk_t*>)chunk_obj,
 		  queue_out );
+
 	}
 	rslice.commit();
-    }
-    ssync();
-}
-
-void sub_SDC( chunk_t * chunk, obj::pushdep<chunk_t*> queue_out ) {
-  static mutex lock;
-
-  //Deduplicate
-  leaf_call(sub_SHA1, chunk);
-  lock.lock();
-  leaf_call(sub_Deduplicate, chunk);
-  lock.unlock();
-
-  //If chunk is unique compress & archive it.
-  leaf_call( sub_Compress, chunk );
-
-  queue_out.push( chunk );
-}
-
-void sub_DC_rec( struct thread_args * args,
-		 obj::popdep<chunk_t*> queue_in,
-		 obj::pushdep<chunk_t*> queue_out ) {
-    while( !queue_in.empty() ) {
-	spawn( sub_DC<obj::prefixdep>, args, queue_in.prefix( QSIZE2 ), queue_out );
+	// wslice.commit();
     }
     ssync();
 }
@@ -647,7 +502,7 @@ void sub_W( struct thread_args * args,
       leaf_call(write_chunk_to_file, fd_out, chunk);
       /*
       obj::read_slice<obj::queue_metadata, chunk_t*> rslice
-	          = queue.get_slice_upto( QSIZE3, 0 );
+	          = queue.get_slice_upto( QSIZE2, 0 );
       for( size_t i=0; i < rslice.get_npops(); ++i ) {
 	chunk_t * chunk = rslice.pop();
 
@@ -660,101 +515,9 @@ void sub_W( struct thread_args * args,
     leaf_call(close, (int)fd_out);
 }
 
-
-template<template <typename U> class DepTy>
-void sub_FragmentRefine_df( struct thread_args * args,
-			    DepTy<chunk_t *> queue_in,
-			    obj::pushdep<chunk_t *> queue_out) {
-  const int qid = args->tid / MAX_THREADS_PER_QUEUE;
-  int r;
-
-  chunk_t *temp;
-  chunk_t *chunk;
-  u32int * rabintab = malloc(256*sizeof rabintab[0]);
-  u32int * rabinwintab = malloc(256*sizeof rabintab[0]);
-  if(rabintab == NULL || rabinwintab == NULL) {
-    EXIT_TRACE("Memory allocation failed.\n");
-  }
-
-  obj::write_slice<obj::queue_metadata,chunk_t *> wslice
-      = queue_out.get_write_slice( QSIZE2 );
-
-  while ( !queue_in.empty() ) {
-    chunk = queue_in.pop();
-    if( !chunk )
-	break;
-
-    leaf_call(rabininit,rf_win, rabintab, rabinwintab);
-
-    int split;
-    do {
-      //Find next anchor with Rabin fingerprint
-	int offset = leaf_call(rabinseg, (uchar*)chunk->uncompressed_data.ptr, (int)chunk->uncompressed_data.n, rf_win, rabintab, rabinwintab);
-      //Can we split the buffer?
-      if(offset < chunk->uncompressed_data.n) {
-        //Allocate a new chunk and create a new memory buffer
-	temp = (chunk_t *)leaf_call(malloc,sizeof(chunk_t));
-        if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
-        temp->header.state = chunk->header.state;
-        // temp->sequence.l1num = chunk->sequence.l1num;
-
-        //split it into two pieces
-        r = leaf_call(mbuffer_split,&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
-        if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
-
-        //Set correct state and sequence numbers
-        // chunk->sequence.l2num = chcount;
-        // chunk->isLastL2Chunk = FALSE;
-        // chcount++;
-
-#ifdef ENABLE_STATISTICS
-        //update statistics
-        // thread_stats->nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
-        __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
-#endif //ENABLE_STATISTICS
-
-        //put it into send buffer
-	if( !wslice.push( chunk ) ) {
-	    wslice.commit();
-	    wslice = queue_out.get_write_slice( QSIZE2 );
-	}
-
-        //prepare for next iteration
-        chunk = temp;
-        split = 1;
-      } else {
-        //End of buffer reached, don't split but simply enqueue it
-        //Set correct state and sequence numbers
-        // chunk->sequence.l2num = chcount;
-        // chunk->isLastL2Chunk = TRUE;
-        // chcount++;
-
-#ifdef ENABLE_STATISTICS
-        //update statistics
-        __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
-#endif //ENABLE_STATISTICS
-
-        //put it into send buffer
-	if( !wslice.push( chunk ) ) {
-	    wslice.commit();
-	    wslice = queue_out.get_write_slice( QSIZE2 );
-	}
-        //prepare for next iteration
-        chunk = NULL;
-        split = 0;
-      }
-    } while(split);
-  }
-
-  wslice.commit();
-
-  free(rabintab);
-  free(rabinwintab);
-}
-
 void sub_FragmentRefine_df2( struct thread_args * args,
 			     chunk_t * chunk,
-			     obj::pushdep<chunk_t *> wqueue) {
+			     obj::pushdep<chunk_t *> queue_out) {
   const int qid = args->tid / MAX_THREADS_PER_QUEUE;
   int r;
 
@@ -766,6 +529,9 @@ void sub_FragmentRefine_df2( struct thread_args * args,
   }
 
   leaf_call(rabininit,rf_win, rabintab, rabinwintab);
+
+  obj::write_slice<obj::queue_metadata, chunk_t*> wslice
+    = queue_out.get_write_slice( QSIZE2 );
 
   int split;
   do {
@@ -795,7 +561,11 @@ void sub_FragmentRefine_df2( struct thread_args * args,
 #endif //ENABLE_STATISTICS
 
       //put it into send buffer
-      spawn( sub_SDC, chunk, wqueue );
+      // spawn( sub_SDC, chunk, wqueue );
+      if( wslice.push( chunk ) ) {
+	wslice.commit();
+	wslice = queue_out.get_write_slice( QSIZE2 );
+      }
 
       //prepare for next iteration
       chunk = temp;
@@ -813,7 +583,11 @@ void sub_FragmentRefine_df2( struct thread_args * args,
 #endif //ENABLE_STATISTICS
 
       //put it into send buffer
-      spawn( sub_SDC, chunk, wqueue );
+      // spawn( sub_SDC, chunk, wqueue );
+      if( wslice.push( chunk ) ) {
+	wslice.commit();
+	wslice = queue_out.get_write_slice( QSIZE2 );
+      }
 
       //prepare for next iteration
       chunk = NULL;
@@ -821,20 +595,12 @@ void sub_FragmentRefine_df2( struct thread_args * args,
     }
   } while(split);
 
+  wslice.commit();
+
   ssync();
 
   free(rabintab);
   free(rabinwintab);
-}
-
-void sub_FragmentRefine_rec( struct thread_args * args,
-			     obj::popdep<chunk_t *> queue_in,
-			     obj::pushdep<chunk_t *> queue_out) {
-    while( !queue_in.empty() ) {
-	spawn( sub_FragmentRefine_df<obj::prefixdep>, args,
-	       queue_in.prefix( 1 ), queue_out );
-    }
-    ssync();
 }
 
 void sub_Fragment_df( struct thread_args * args, obj::pushdep<chunk_t *> queue) {
@@ -1062,10 +828,13 @@ void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_
 
       //"Extension" of existing buffer, copy sequence number and left over data to beginning of new buffer
       //NOTE: We cannot safely extend the current memory region because it has already been given to another thread
+      chunk->header.state = CHUNK_STATE_UNCOMPRESSED;
       memcpy(chunk->uncompressed_data.ptr, temp->uncompressed_data.ptr, temp->uncompressed_data.n);
       leaf_call(mbuffer_free,&temp->uncompressed_data);
       leaf_call(free, (void*)temp);
       temp = NULL;
+    } else {
+      chunk->header.state = CHUNK_STATE_UNCOMPRESSED;
     }
     //Read data until buffer full
     size_t bytes_read=0;
@@ -1121,7 +890,11 @@ void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_
 
       // Pthreads code will send to FragmentRefine here...
       // queue.push( chunk );
-      spawn( sub_FragmentRefine_df2, args, chunk, queue_out );
+      {
+	obj::hyperqueue<chunk_t *> * q = new obj::hyperqueue<chunk_t*>( QSIZE2 );
+	spawn( sub_FragmentRefine_df2, args, chunk, (obj::pushdep<chunk_t*>)*q );
+	spawn( sub_SDCq, (obj::popdep<chunk_t*>)*q, queue_out );
+      }
 
       //stop fetching from input buffer, terminate processing
       break;
@@ -1129,8 +902,6 @@ void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_
 
     //partition input block into fine-granular chunks
     int split;
-    static int cnt;
-    cnt = 0;
     do {
       split = 0;
       //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
@@ -1158,7 +929,11 @@ void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_
     #endif //ENABLE_STATISTICS
 
 	    // queue.push( chunk );
-	    spawn( sub_FragmentRefine_df2, args, chunk, queue_out );
+	    {
+	      obj::hyperqueue<chunk_t *> * q = new obj::hyperqueue<chunk_t*>( QSIZE2 );
+	      spawn( sub_FragmentRefine_df2, args, chunk, (obj::pushdep<chunk_t*>)*q );
+	      spawn( sub_SDCq, (obj::popdep<chunk_t*>)*q, queue_out );
+	    }
 
 	    chunk = temp;
 	    temp = NULL;
@@ -1179,7 +954,6 @@ void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_
 	  chunk = 0;
 	  split = 0;
       }
-      ++cnt;
     } while(split);
   }
 
@@ -1192,54 +966,11 @@ void sub_Fragment_df2( struct thread_args * args, obj::pushdep<chunk_t *> queue_
 }
 
 void SwanIntegratedPipeline(struct thread_args * args) {
-#if 0
-    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
-    obj::hyperqueue<chunk_t *> queue2( QSIZE2 );
-
-    spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
-    spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
-	   (obj::pushdep<chunk_t*>)queue2 );
-    spawn( sub_DCW, args, (obj::popdep<chunk_t*>)queue2 );
-    ssync();
-#else
-#if 0
-    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
-    obj::hyperqueue<chunk_t *> queue2( QSIZE2 );
-    obj::hyperqueue<chunk_t *> wqueue( QSIZE2 );
-
-    spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
-    spawn( sub_FragmentRefine_df<obj::popdep>, args, (obj::popdep<chunk_t*>)queue1,
-	   (obj::pushdep<chunk_t*>)queue2 );
-    spawn( sub_DC<obj::popdep>, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
-    spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
-    ssync();
-#else
-#if 0
-    obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
-    obj::hyperqueue<chunk_t *> queue2( QSIZE2 );
-    obj::hyperqueue<chunk_t *> queue2a( QSIZE2 );
-    obj::hyperqueue<chunk_t *> queue2b( QSIZE2 );
-    obj::hyperqueue<chunk_t *> wqueue( QSIZE3 );
-
-    spawn( sub_Fragment_df, args, (obj::pushdep<chunk_t*>)queue1 );
-    spawn( sub_FragmentRefine_rec, args, (obj::popdep<chunk_t*>)queue1,
-	   (obj::pushdep<chunk_t*>)queue2a );
-    spawn( sub_SHA1_pipe, (obj::popdep<chunk_t*>)queue2a, (obj::pushdep<chunk_t*>)queue2b );
-    spawn( sub_Deduplicate_pipe, (obj::popdep<chunk_t*>)queue2b, (obj::pushdep<chunk_t*>)queue2 );
-    spawn( sub_Compress_pipe, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
-    // spawn( sub_DC_rec, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
-    // spawn( sub_DC<obj::popdep>, args, (obj::popdep<chunk_t*>)queue2, (obj::pushdep<chunk_t*>)wqueue );
-    spawn( sub_W, args, (obj::popdep<chunk_t*>)wqueue );
-    ssync();
-#else
     obj::hyperqueue<chunk_t *> queue1( QSIZE1 );
 
     spawn( sub_Fragment_df2, args, (obj::pushdep<chunk_t*>)queue1 );
     spawn( sub_W, args, (obj::popdep<chunk_t*>)queue1 );
     ssync();
-#endif
-#endif
-#endif
 }
 
 /* 

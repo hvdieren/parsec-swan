@@ -616,8 +616,6 @@ void SwanIntegratedPipeline(struct thread_args * args) {
       spawn(sub_FragmentRefine_df, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj, (obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
 #endif
 
-      ssync();
-
       //stop fetching from input buffer, terminate processing
       break;
     }
@@ -679,10 +677,11 @@ void SwanIntegratedPipeline(struct thread_args * args) {
 	  split = 0;
       }
     } while(split);
-    ssync(); // TODO
     temp = (chunk_t*)chunk_obj;
     chunk_obj = chunk = 0;
   }
+
+  ssync();
 
   leaf_call(free, (void*)rabintab);
   leaf_call(free, (void*)rabinwintab);
