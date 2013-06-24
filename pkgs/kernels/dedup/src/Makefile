@@ -29,6 +29,13 @@ ifdef version
     CFLAGS += -DENABLE_PTHREADS -pthread
     DEDUP_OBJ += queue.o binheap.o tree.o
   endif
+  ifeq "$(version)" "tbb_funcobj"
+    CFLAGS += -DPARALLEL -DTBB_FUNCOBJ -DTBB
+    CXXFLAGS += -DPARALLEL -DTBB_FUNCOBJ -DTBB
+    COMPILER=$(CXX)
+    COMPILER_FLAGS=$(CXXFLAGS)
+    DEDUP_OBJ += encoder-funcobj.o
+  endif
   ifeq "$(version)" "swan-obj"
     #CFLAGS += ${dedup_flags}
     CFLAGS += -DENABLE_SWAN -pthread

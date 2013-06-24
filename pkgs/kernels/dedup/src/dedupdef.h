@@ -215,5 +215,12 @@ typedef struct {
 
 #define UNCOMPRESS_BOUND 10000000
 
+#define TAG_OCCUPY 0
+#define TAG_DATAREADY 1
+#define TAG_WRITTEN 2 
+
+#define MIN_RABIN_CHUNK_SIZE (1*1024)
+#define MAX_RABIN_CHUNK_SIZE (60*1024)
+
 #endif //_DEDUPDEF_H_
 

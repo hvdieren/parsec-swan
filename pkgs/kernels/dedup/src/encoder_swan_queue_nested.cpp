@@ -396,7 +396,7 @@ void sub_Deduplicate(chunk_t *chunk) {
     assert(chunk!=NULL);
     assert(chunk->uncompressed_data.ptr!=NULL);
 
-#if LEAF
+#if LEAF || 1
     SHA1_Digest( (const void*)chunk->uncompressed_data.ptr, chunk->uncompressed_data.n, (unsigned char *)(chunk->sha1));
 #endif
 
@@ -458,13 +458,6 @@ void set_chunk_obj( obj::outdep<chunk_t*> chunk_obj, chunk_t * temp) {
 
 void sub_SDCqt( obj::popdep<chunk_t*> queue_in, obj::pushdep<chunk_t*> queue_out,
 		obj::outdep<int> token ) {
-#if !LEAF
-    obj::object_t<chunk_t *> chunk_obj;
-
-    obj::unversioned<hashtable *> cache_obj;
-    cache_obj = cache;
-#endif
-
     while( !queue_in.empty() ) {
 	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
 	    = queue_in.get_slice_upto( QSIZE2, 0 );
@@ -490,26 +483,17 @@ void sub_SDCqt( obj::popdep<chunk_t*> queue_in, obj::pushdep<chunk_t*> queue_out
 	    = queue_out.get_write_slice( rslice.get_npops() );
 	for( size_t i=0; i < rslice.get_npops(); ++i ) {
 	    chunk_t * chunk = rslice.pop();
-	    wslice.push( chunk ); // still unvisible to consumer!
-
-	    call( set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, chunk );
+	    wslice.push( chunk ); // still invisible to consumer!
 
 	    //Deduplicate
-	    spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
-	    spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-#if CINOUT
-		  (obj::cinoutdep<hashtable*>)cache_obj
-#else
-		  (obj::inoutdep<hashtable*>)cache_obj
-#endif
-		);
+	    // spawn(sub_SHA1_df, (obj::inoutdep<chunk_t*>)chunk_obj );
+	    leaf_call( sub_Deduplicate, chunk );
 
 	    //If chunk is unique compress & archive it.
 	    // This spawn causes the queue_out to be fragmented: every
 	    // segment typically ends up with 1 chunk_t*
-	    // spawn(sub_Compress_push_df, (obj::inoutdep<chunk_t*>)chunk_obj,
-		  // queue_out );
-	    spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj );
+	    if( !chunk->header.isDuplicate )
+		spawn( sub_Compress, chunk );
 
 	}
 	ssync(); // make sure chunks are finished before they are visible
