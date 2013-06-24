@@ -74,7 +74,7 @@ export MAKE="${GNUTOOL_HOME}/bin/${BINARY_PREFIX}make"
 PORTABILITY_FLAGS="-static-libgcc -Wl,--hash-style=both,--as-needed"
 
 # Flags for pipelining
-PIPE_FLAGS="-momit-leaf-frame-pointer -fno-omit-frame-pointer -pthread -DMODE=0 -O0 -std=c++0x"
+PIPE_FLAGS="-momit-leaf-frame-pointer -fno-omit-frame-pointer -pthread -DMODE=1 -O4 -DOBJECT_TASKGRAPH=11 -std=c++0x"
 
 
 # Arguments to use
@@ -83,7 +83,7 @@ export CXXFLAGS="-O4 -funroll-loops -fprefetch-loop-arrays -fpermissive -fno-exc
 export CPPFLAGS=""
 export CXXCPPFLAGS=""
 export LDFLAGS=""
-#export LIBS="${HOME}/research/swan-queue/obj/scheduler/libschedulers.a -lpthread -lhwloc"
+export PIPE_LDLIBS="${HOME}/research/swan-queue/obj/scheduler/libschedulers.a -lpthread -lhwloc"
 #export LIBS=""
 export EXTRA_LIBS=""
 
