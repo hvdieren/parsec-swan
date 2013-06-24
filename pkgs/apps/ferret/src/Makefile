@@ -76,11 +76,11 @@ ifdef version
   endif
   ifeq "$(version)" "swan-queue"
     benchmark_base := ferret-swan-queue
-    LDLIBS +=
+    LDLIBS += $(PIPE_LDLIBS)
   endif
   ifeq "$(version)" "swan-obj"
     benchmark_base := ferret-swan-obj
-    LDLIBS +=
+    LDLIBS += $(PIPE_LDLIBS)
   endif
 endif
 

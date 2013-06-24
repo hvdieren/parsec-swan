@@ -431,11 +431,13 @@ using namespace std;
 void pipeline()
 {
 //	const char* dummy;
+/*
 	object_t<seg_data> segdataobj;
 	object_t<extract_data> extractarg;
 	object_t<vec_query_data> vecarg;
 	object_t<rank_data> rankarg;
 	unversioned<int>	wait;
+*/
 /*	unversioned<seg_data> segdataobj;
 	unversioned<extract_data> extractarg;
 	unversioned<vec_query_data> vecarg;
