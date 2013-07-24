@@ -30,6 +30,11 @@
 
 #include <list>
 
+#include "tbb/pipeline.h"
+
+#define OUTER_PIPELINE_NUM_TOKENS 1024 
+#define INNER_PIPELINE_NUM_TOKENS 1024
+
 extern "C" {
 #include "util.h"
 #include "dedupdef.h"
@@ -383,69 +388,121 @@ void sub_Deduplicate(chunk_t *chunk) {
   return;
 }
 
-void sub_FragmentRefine_df( int fd_out_in, chunk_t * chunk_in, std::list<chunk_t *> & list_out ) {
-  // TODO: turn whole thing into leaf
-  int r;
-  chunk_t * temp;
-  chunk_t * chunk = chunk_in;
+class InnerPipeline {
+    std::list<chunk_t *> list_out;
 
-  u32int * rabintab = (uint32_t*)malloc(256*sizeof rabintab[0]);
-  u32int * rabinwintab = (uint32_t*)malloc(256*sizeof rabintab[0]);
-  if(rabintab == NULL || rabinwintab == NULL) {
-    EXIT_TRACE("Memory allocation failed.\n");
-  }
+    class FragmentRefine : public tbb::filter {
+	u32int rabintab[256];
+	u32int rabinwintab[256];
+	chunk_t * chunk;
+	int split;
+	static const int rf_win = 0;
 
-  // printf( "FragmentRefine...\n" );
-
-  rabininit(rf_win, rabintab, rabinwintab);
-
-    //partition input block into fine-granular chunks
-    int split;
-    do {
-      split = 0;
-      //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
-	  int offset = rabinseg((uchar*)chunk->uncompressed_data.ptr, (int)chunk->uncompressed_data.n, rf_win, rabintab, rabinwintab);
-      //Did we find a split location?
-	  if(offset < (int)chunk->uncompressed_data.n) {
-	    //Split found somewhere in the middle of the buffer
-	    //Allocate a new chunk and create a new memory buffer
-	    temp = (chunk_t *)malloc(sizeof(chunk_t));
-	    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
-
-	    //split it into two pieces
-	    r = mbuffer_split(&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
-	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
-	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
-
-    #ifdef ENABLE_STATISTICS
-	    //update statistics
-	    stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
-    #endif //ENABLE_STATISTICS
-
-	    split = 1;
-	} else {
-	    // Quit loop. Last piece of fragment.
-	    split = 0;
+    public:
+	FragmentRefine( chunk_t * chunk_in ) : filter( true ), chunk( chunk_in ), split( 1 ) {
+	    rabininit(rf_win, rabintab, rabinwintab);
 	}
 
-	list_out.push_back( chunk );
+	void * operator() ( void * ) { // no inputs
+	    chunk_t * temp;
 
-	//prepare for next iteration
-	chunk = temp;
-	temp = NULL;
-    } while(split);
+	    if( !split )
+		return NULL;
 
-  free((void*)rabintab);
-  free((void*)rabinwintab);
+	    //partition input block into fine-granular chunks
+	    split = 0;
+	    //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
+	    int offset = rabinseg((uchar*)chunk->uncompressed_data.ptr, (int)chunk->uncompressed_data.n, rf_win, rabintab, rabinwintab);
+	    //Did we find a split location?
+	    if(offset < (int)chunk->uncompressed_data.n) {
+		//Split found somewhere in the middle of the buffer
+		//Allocate a new chunk and create a new memory buffer
+		temp = (chunk_t *)malloc(sizeof(chunk_t));
+		if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
 
-  return;
-}
+		//split it into two pieces
+		int r = mbuffer_split(&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+		if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
+		temp->header.state = CHUNK_STATE_UNCOMPRESSED;
+
+#ifdef ENABLE_STATISTICS
+		//update statistics
+		stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
+#endif //ENABLE_STATISTICS
+
+		split = 1;
+	    } else {
+		// Quit loop. Last piece of fragment.
+		split = 0;
+	    }
+
+	    chunk_t * ret = chunk;
+
+	    //prepare for next iteration
+	    chunk = temp;
+	    temp = NULL;
+	    return (void *)ret;
+	}
+    };
+
+    class Deduplicate : public tbb::filter {
+    public:
+	Deduplicate() : filter( false ) { }
+	void * operator() ( void * item ) {
+	    chunk_t * chunk = (chunk_t *)item;
+	    sub_Deduplicate( chunk );
+	    return item;
+	}
+    };
+
+    class Compress : public tbb::filter {
+    public:
+	Compress() : filter( false ) { }
+	void * operator() ( void * item ) {
+	    chunk_t * chunk = (chunk_t *)item;
+	    sub_Compress( chunk );
+	    return item;
+	}
+    };
+
+    class Reassemble : public tbb::filter {
+	std::list<chunk_t *> & list_out;
+
+    public:
+	Reassemble( std::list<chunk_t *> & l ) : filter( true ), list_out( l ) { }
+	void * operator() ( void * item ) {
+	    chunk_t * chunk = (chunk_t *)item;
+	    list_out.push_back( chunk );
+	    return NULL;
+	}
+    };
+
+public:
+    InnerPipeline( chunk_t * chunk ) {
+	tbb::pipeline inner;
+
+	FragmentRefine refine( chunk );
+	Deduplicate deduplicate;
+	Compress compress;
+	Reassemble reassemble( list_out );
+
+	inner.add_filter( refine );
+	inner.add_filter( deduplicate );
+	inner.add_filter( compress );
+	inner.add_filter( reassemble );
+
+	inner.run( INNER_PIPELINE_NUM_TOKENS );
+	inner.clear();
+    }
+
+    std::list<chunk_t *> & get_list() { return list_out; }
+};
 
 /* 
  * Integrate all computationally intensive pipeline
  * stages to improve cache efficiency.
  */
-void SwanIntegratedPipeline(struct thread_args * args) {
+void TBBIntegratedPipeline(struct thread_args * args) {
   size_t preloading_buffer_seek = 0;
   int fd = args->fd;
   int fd_out = create_output_file(conf->outfile);
@@ -554,17 +611,13 @@ void SwanIntegratedPipeline(struct thread_args * args) {
 #endif //ENABLE_STATISTICS
 
       // Pthreads code will send to FragmentRefine here...
-
-	{
-	std::list<chunk_t *> l;
-	sub_FragmentRefine_df( fd_out, chunk, l );
-	std::list<chunk_t *> & ll = l;
-	for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
-	    sub_Deduplicate( *I );
-	    sub_Compress( *I );
-	    write_chunk_to_file( fd_out, *I );
-	}
-	}
+      {
+	  InnerPipeline inner( chunk );
+	  std::list<chunk_t *> & ll = inner.get_list();
+	  for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
+	      write_chunk_to_file( fd_out, *I );
+	  }
+      }
 
       //stop fetching from input buffer, terminate processing
       break;
@@ -601,14 +654,11 @@ void SwanIntegratedPipeline(struct thread_args * args) {
     #endif //ENABLE_STATISTICS
 
 	    {
-	    std::list<chunk_t *> l;
-	    sub_FragmentRefine_df( fd_out, chunk, l );
-	    std::list<chunk_t *> & ll = l;
-	    for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
-		sub_Deduplicate( *I );
-		sub_Compress( *I );
-		write_chunk_to_file( fd_out, *I );
-	    }
+		InnerPipeline inner( chunk );
+		std::list<chunk_t *> & ll = inner.get_list();
+		for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
+		    write_chunk_to_file( fd_out, *I );
+		}
 	    }
 
 	    //prepare for next iteration
@@ -911,7 +961,7 @@ void Encode(config_t * _conf) {
     generic_args.input_file.buffer = preloading_buffer;
   }
 
-#ifdef ENABLE_SWAN
+#ifdef TBB_FUNCOBJ
 
   generic_args.tid = 0;
   generic_args.nqueues = -1;
@@ -922,7 +972,7 @@ void Encode(config_t * _conf) {
 #endif
 
   //Do the processing
-  run(SwanIntegratedPipeline, &generic_args);
+  TBBIntegratedPipeline(&generic_args);
 
 #ifdef ENABLE_PARSEC_HOOKS
   __parsec_roi_end();
@@ -945,7 +995,7 @@ void Encode(config_t * _conf) {
   __parsec_roi_end();
 #endif
 
-#endif //ENABLE_SWAN
+#endif //TBB_FUNCOBJ
 
   //clean up after preloading
   if(conf->preloading) {

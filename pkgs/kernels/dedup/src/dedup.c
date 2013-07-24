@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
   }
 #endif
 
-#ifndef ENABLE_PTHREADS
+#ifndef PARALLEL
  if (conf->nthreads != 1){
     printf("Number of threads must be 1 (serial version)\n");
     exit(1);
