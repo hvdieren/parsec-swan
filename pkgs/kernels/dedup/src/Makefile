@@ -24,6 +24,9 @@ LIBS += -lz
 #CFLAGS += -DENABLE_BZIP2_COMPRESSION
 #LIBS += -lbz2
 
+COMPILER=$(CC)
+COMPILER_FLAGS=$(CFLAGS)
+
 ifdef version
   ifeq "$(version)" "pthreads"
     CFLAGS += -DENABLE_PTHREADS -pthread
@@ -37,10 +40,12 @@ ifdef version
     DEDUP_OBJ += encoder-funcobj.o
   endif
   ifeq "$(version)" "swan-obj"
-    #CFLAGS += ${dedup_flags}
     CFLAGS += -DENABLE_SWAN -pthread
+    CXXFLAGS += -DENABLE_SWAN -pthread
     DEDUP_OBJ := dedup_swan.o encoder_lists.o $(DEDUP_OBJ)
     encoder_lists.o: CC="$(CXX) -I/home/hvandierendonck/research/parsec-3.0/bin/../pkgs/libs/ssl/inst/amd64-linux.swan-obj/include -I/home/hvandierendonck/research/parsec-3.0/bin/../pkgs/libs/zlib/inst/amd64-linux.swan-obj/include -I/home/hvandierendonck/research/swan-queue -I/home/hvandierendonck/research/swan-queue/swan -I/home/hvandierendonck/research/swan-queue/obj -I/home/hvandierendonck/research/swan-queue/obj/scheduler $(CXXFLAGS) $(CFLAGS)"
+    COMPILER=$(CXX)
+    COMPILER_FLAGS=$(CXXFLAGS)
   else
     DEDUP_OBJ += encoder.o dedup.o
   endif
@@ -56,13 +61,8 @@ all: $(TARGET)
 .cpp.o:
 	$(CXX) -c $(CFLAGS) $(CXXFLAGS) $< -o $@
 
-ifeq "$(version)" "swan-obj"
 $(TARGET): $(DEDUP_OBJ)
-	$(CXX) $(CFLAGS) -o $(TARGET) $(DEDUP_OBJ) $(LDFLAGS) $(LIBS)
-else
-$(TARGET): $(DEDUP_OBJ)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET) $(DEDUP_OBJ) $(LIBS)
-endif
+	$(COMPILER) $(COMPILER_FLAGS) -o $(TARGET) $(DEDUP_OBJ) $(LDFLAGS) $(LIBS)
 
 clean:
 	rm -f *~ *.o $(TARGET)
