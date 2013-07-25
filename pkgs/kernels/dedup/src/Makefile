@@ -29,12 +29,12 @@ COMPILER_FLAGS=$(CFLAGS)
 
 ifdef version
   ifeq "$(version)" "pthreads"
-    CFLAGS += -DENABLE_PTHREADS -pthread
-    DEDUP_OBJ += queue.o binheap.o tree.o
+    CFLAGS += -DENABLE_PTHREADS -DPARALLEL -pthread
+    DEDUP_OBJ += dedup.o encoder.o queue.o binheap.o tree.o
   else
   ifeq "$(version)" "tbb_funcobj"
-    CFLAGS += -DPARALLEL -DTBB_FUNCOBJ -DTBB
-    CXXFLAGS += -DPARALLEL -DTBB_FUNCOBJ -DTBB
+    CFLAGS += -DPARALLEL -DTBB_FUNCOBJ -DTBB -DBUDDY_REORDER
+    CXXFLAGS += -DPARALLEL -DTBB_FUNCOBJ -DTBB -DBUDDY_REORDER
     COMPILER=$(CXX)
     COMPILER_FLAGS=$(CXXFLAGS)
     DEDUP_OBJ += dedup_swan.o encoder-funcobj.o
@@ -54,6 +54,9 @@ ifdef version
 endif
 
 CFLAGS+=-g
+
+#CFLAGS+=-pg -p
+#COMPILER_FLAGS+=-pg -p
 
 all: $(TARGET)
 

@@ -338,6 +338,10 @@ void sub_Compress(chunk_t *chunk) {
         stats.total_compressed += chunk->compressed_data.n;
 #endif //ENABLE_STATISTICS
 
+#ifdef BUDDY_REORDER
+     chunk->header.state = CHUNK_STATE_COMPRESSED;
+#endif
+
      return;
 }
 
@@ -361,6 +365,10 @@ void sub_Deduplicate(chunk_t *chunk) {
   // TODO: split off SHA1_Digest as separate stage?
   SHA1_Digest( (const void*)chunk->uncompressed_data.ptr, chunk->uncompressed_data.n, (unsigned char *)(chunk->sha1));
 
+#ifdef BUDDY_REORDER
+  chunk->buddy = 0;
+#endif
+
   //Query database to determine whether we've seen the data chunk before
   entry = (chunk_t *)hashtable_search(cache, (void *)(chunk->sha1));
   isDuplicate = (entry != NULL);
@@ -373,6 +381,9 @@ void sub_Deduplicate(chunk_t *chunk) {
     }
   } else {
     // Cache hit: Skipping compression stage
+#ifdef BUDDY_REORDER
+      chunk->buddy = entry;
+#endif
     chunk->compressed_data_ref = entry;
     mbuffer_free(&chunk->uncompressed_data);
   }
@@ -403,20 +414,20 @@ class InnerPipeline : public tbb::filter {
 	}
 
 	void * operator() ( void * ) { // no inputs
-	    chunk_t * temp;
+	    chunk_t * ret = 0;
 
 	    if( !split )
 		return NULL;
 
 	    //partition input block into fine-granular chunks
 	    split = 0;
-	    //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
+	    //Find next anchor with Rabin fingerprint
 	    int offset = rabinseg((uchar*)chunk->uncompressed_data.ptr, (int)chunk->uncompressed_data.n, rf_win, rabintab, rabinwintab);
 	    //Did we find a split location?
 	    if(offset < (int)chunk->uncompressed_data.n) {
 		//Split found somewhere in the middle of the buffer
 		//Allocate a new chunk and create a new memory buffer
-		temp = (chunk_t *)malloc(sizeof(chunk_t));
+		chunk_t * temp = (chunk_t *)malloc(sizeof(chunk_t));
 		if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
 
 		//split it into two pieces
@@ -424,22 +435,28 @@ class InnerPipeline : public tbb::filter {
 		if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
 		temp->header.state = CHUNK_STATE_UNCOMPRESSED;
 
+#ifdef BUDDY_REORDER
+		temp->sequence = chunk->sequence;
+		sequence_inc_l2( &temp->sequence );
+#endif
+
 #ifdef ENABLE_STATISTICS
 		//update statistics
 		stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
 #endif //ENABLE_STATISTICS
 
+		ret = chunk;
+		chunk = temp;
+
 		split = 1;
 	    } else {
 		// Quit loop. Last piece of fragment.
+		ret = chunk;
+		chunk = 0;
 		split = 0;
 	    }
 
-	    chunk_t * ret = chunk;
-
 	    //prepare for next iteration
-	    chunk = temp;
-	    temp = NULL;
 	    return (void *)ret;
 	}
     };
@@ -483,12 +500,12 @@ public:
 	chunk_t * chunk = (chunk_t *)item;
 	std::list<chunk_t *> * list_out = new std::list<chunk_t *>();
 
-	tbb::pipeline inner;
-
 	FragmentRefine refine( chunk );
 	Deduplicate deduplicate;
 	Compress compress;
 	Reassemble reassemble( *list_out );
+
+	tbb::pipeline inner;
 
 	inner.add_filter( refine );
 	inner.add_filter( deduplicate );
@@ -515,9 +532,16 @@ class OuterPipeline {
 	chunk_t *temp;
 	chunk_t *chunk;
 	static const int rf_win_dataprocess = 0;
+#ifdef BUDDY_REORDER
+	sequence_number_t seq;
+#endif
 
     public:
-	Fragment( struct thread_args * args ) : tbb::filter( true ), args( args ) {
+	Fragment( struct thread_args * args ) : tbb::filter( true ), args( args )
+#ifdef BUDDY_REORDER
+					      , seq( 0 )
+#endif
+	    {
 	    rabininit(rf_win_dataprocess, rabintab, rabinwintab);
 	    fd = args->fd;
 	    split = 0;
@@ -557,6 +581,10 @@ class OuterPipeline {
 		//Allocate a new chunk and create a new memory buffer
 		chunk = (chunk_t *)malloc(sizeof(chunk_t));
 		if(chunk==NULL) EXIT_TRACE("Memory allocation failed.\n");
+#ifdef BUDDY_REORDER
+		chunk->sequence.l1num = seq++;
+		chunk->sequence.l2num = 0;
+#endif
 		r = mbuffer_create(&chunk->uncompressed_data, MAXBUF+bytes_left);
 		if(r!=0) {
 		    EXIT_TRACE("Unable to initialize memory buffer.\n");
@@ -625,8 +653,8 @@ class OuterPipeline {
 		    stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
 #endif //ENABLE_STATISTICS
 
-		    return (void *)chunk;
 		    split = -1;
+		    return (void *)chunk;
 		}
 	    }
 
@@ -640,16 +668,21 @@ class OuterPipeline {
 		    //Split found at the very beginning of the buffer (should never happen due to technical limitations)
 		    assert(0);
 		    split = 0;
-		} else if(offset < (int)chunk->uncompressed_data.n) {
+		} else if(offset + ANCHOR_JUMP < (int)chunk->uncompressed_data.n) {
 		    //Split found somewhere in the middle of the buffer
 		    //Allocate a new chunk and create a new memory buffer
 		    temp = (chunk_t *)malloc(sizeof(chunk_t));
 		    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
 
 		    //split it into two pieces
-		    r = mbuffer_split(&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+		    r = mbuffer_split(&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset + ANCHOR_JUMP);
 		    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
 		    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
+
+#ifdef BUDDY_REORDER
+		    temp->sequence.l1num = seq++;
+		    temp->sequence.l2num = 0;
+#endif
 
 #ifdef ENABLE_STATISTICS
 		    //update statistics
@@ -659,19 +692,21 @@ class OuterPipeline {
 		    //prepare for next iteration
 		    chunk_t * ret = chunk;
 		    chunk = temp;
+		    temp = NULL;
 		    split = 1;
 		    return (void *)ret;
 		} else {
 		    //Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
 		    //This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
+		    temp = (chunk_t*)chunk;
+		    chunk = 0;
 		    split = 0;
 		}
 	    } else {
+		temp = (chunk_t*)chunk;
+		chunk = 0;
 		split = 0;
 	    }
-
-	    temp = (chunk_t*)chunk;
-	    chunk = 0;
 
 	    goto outer_loop;
 	}
@@ -680,13 +715,60 @@ class OuterPipeline {
     class Reorder : public tbb::filter {
 	int fd_out;
     public:
-	Reorder( int fd_out ) : tbb::filter( true ), fd_out( fd_out ) {
-	}
+	Reorder( int fd_out ) : tbb::filter( true ), fd_out( fd_out ) { }
 
 	void * operator()( void * l ) {
 	    std::list<chunk_t *> & ll = *(std::list<chunk_t *>*)l;
 	    for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
-		write_chunk_to_file( fd_out, *I );
+		chunk_t * chunk = *I;
+
+#ifdef BUDDY_REORDER
+		if( chunk->header.state == CHUNK_STATE_FLUSHED ) {
+		    // This chunk has a duplicate buddy earlier in the stream, and its data have been
+		    // output for its buddy
+		    assert( !chunk->header.isDuplicate );
+
+		    //Duplicate chunk, data has been written to file before, just write SHA1
+		    write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+		    mbuffer_free(&chunk->compressed_data); // Delay deallocation until now...
+		} else if( chunk->header.state == CHUNK_STATE_COMPRESSED ) {
+		    // This is not a duplicate. It has been compressed. There is no buddy.
+		    assert( !chunk->header.isDuplicate );
+		    assert( !chunk->buddy );
+
+		    //Unique chunk, data has not been written yet, do so now
+		    write_file(fd_out, TYPE_COMPRESS, chunk->compressed_data.n, (uint8_t*)chunk->compressed_data.ptr);
+		    // mbuffer_free(&chunk->compressed_data);
+		} else {
+		    // This is a duplicate. With or without a buddy.
+		    assert( chunk->header.isDuplicate );
+		    assert( chunk->buddy );
+
+		    // Is this chunk logically before it's buddy? If so, output
+		    // data now and mark buddy as such
+		    assert( !chunk->buddy->header.isDuplicate );
+		    if( sequence_lt( chunk->sequence, chunk->buddy->sequence ) ) {
+			// Wait until buddy is compressed
+			while( chunk->buddy->header.state == CHUNK_STATE_UNCOMPRESSED );
+
+			if( chunk->buddy->header.state == CHUNK_STATE_FLUSHED ) {
+			    // Buddy has already been written. At least 2 chunks have been overtaken. Write SHA1.
+			    write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+			} else {
+			    // Write the buddy's data now, and mark it as such.
+			    write_file(fd_out, TYPE_COMPRESS, chunk->buddy->compressed_data.n, (uint8_t*)chunk->buddy->compressed_data.ptr);
+			    chunk->buddy->header.state = CHUNK_STATE_FLUSHED;
+			}
+		    } else {
+			//Duplicate chunk, data has been written to file before, just write SHA1
+			write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+		    }
+
+		    free((void*)chunk);
+		}
+#else
+		write_chunk_to_file(fd_out, chunk);
+#endif
 	    }
 	    delete &ll;
 	    return NULL;
@@ -696,11 +778,11 @@ public:
     OuterPipeline( struct thread_args * args ) {
 	fd_out = create_output_file(conf->outfile);
 
-	tbb::pipeline outer;
-
 	Fragment fragment( args );
 	InnerPipeline inner;
 	Reorder reorder( fd_out );
+
+	tbb::pipeline outer;
 
 	outer.add_filter( fragment );
 	outer.add_filter( inner );
@@ -712,192 +794,6 @@ public:
 	close( (int)fd_out);
     }
 };
-
-#if 0
-void TBBIntegratedPipeline(struct thread_args * args) {
-  size_t preloading_buffer_seek = 0;
-  int fd = args->fd;
-  int fd_out = create_output_file(conf->outfile);
-  int r;
-
-  chunk_t *temp = NULL;
-  chunk_t *chunk = NULL;
-  u32int * rabintab = (uint32_t*)malloc(256*sizeof rabintab[0]);
-  u32int * rabinwintab = (uint32_t*)malloc(256*sizeof rabintab[0]);
-  if(rabintab == NULL || rabinwintab == NULL) {
-    EXIT_TRACE("Memory allocation failed.\n");
-  }
-
-  rf_win_dataprocess = 0;
-  rabininit(rf_win_dataprocess, rabintab, rabinwintab);
-
-  //Sanity check
-  if(MAXBUF < 8 * ANCHOR_JUMP) {
-    printf("WARNING: I/O buffer size is very small. Performance degraded.\n");
-    fflush(NULL);
-  }
-
-  //read from input file / buffer
-  while (1) {
-    size_t bytes_left; //amount of data left over in last_mbuffer from previous iteration
-
-    //Check how much data left over from previous iteration resp. create an initial chunk
-    if(temp != NULL) {
-      bytes_left = temp->uncompressed_data.n;
-    } else {
-      bytes_left = 0;
-    }
-
-    //Make sure that system supports new buffer size
-    if(MAXBUF+bytes_left > SSIZE_MAX) {
-      EXIT_TRACE("Input buffer size exceeds system maximum.\n");
-    }
-    //Allocate a new chunk and create a new memory buffer
-    chunk = (chunk_t *)malloc(sizeof(chunk_t));
-    if(chunk==NULL) EXIT_TRACE("Memory allocation failed.\n");
-    r = mbuffer_create(&chunk->uncompressed_data, MAXBUF+bytes_left);
-    if(r!=0) {
-      EXIT_TRACE("Unable to initialize memory buffer.\n");
-    }
-    chunk->header.state = CHUNK_STATE_UNCOMPRESSED;
-    if(bytes_left > 0) {
-      //FIXME: Short-circuit this if no more data available
-
-      //"Extension" of existing buffer, copy sequence number and left over data to beginning of new buffer
-      //NOTE: We cannot safely extend the current memory region because it has already been given to another thread
-      memcpy(chunk->uncompressed_data.ptr, temp->uncompressed_data.ptr, temp->uncompressed_data.n);
-      mbuffer_free(&temp->uncompressed_data);
-      free((void*)temp);
-      temp = NULL;
-    }
-    //Read data until buffer full
-    size_t bytes_read=0;
-    if(conf->preloading) {
-      size_t max_read = MIN(MAXBUF, args->input_file.size-preloading_buffer_seek);
-      memcpy((char*)chunk->uncompressed_data.ptr+bytes_left, (char*)args->input_file.buffer+preloading_buffer_seek, max_read);
-      bytes_read = max_read;
-      preloading_buffer_seek += max_read;
-    } else {
-      while(bytes_read < MAXBUF) {
-        r = read( fd, (void*)((char*)chunk->uncompressed_data.ptr+bytes_left+bytes_read), (size_t)MAXBUF-bytes_read);
-        if(r<0) switch(errno) {
-          case EAGAIN:
-            EXIT_TRACE("I/O error: No data available\n");break;
-          case EBADF:
-            EXIT_TRACE("I/O error: Invalid file descriptor\n");break;
-          case EFAULT:
-            EXIT_TRACE("I/O error: Buffer out of range\n");break;
-          case EINTR:
-            EXIT_TRACE("I/O error: Interruption\n");break;
-          case EINVAL:
-            EXIT_TRACE("I/O error: Unable to read from file descriptor\n");break;
-          case EIO:
-            EXIT_TRACE("I/O error: Generic I/O error\n");break;
-          case EISDIR:
-            EXIT_TRACE("I/O error: Cannot read from a directory\n");break;
-          default:
-            EXIT_TRACE("I/O error: Unrecognized error\n");break;
-        }
-        if(r==0) break;
-        bytes_read += r;
-      }
-    }
-    //No data left over from last iteration and also nothing new read in, simply clean up and quit
-    if(bytes_left + bytes_read == 0) {
-      mbuffer_free( &chunk->uncompressed_data);
-      free( (void*)chunk);
-      chunk = NULL;
-      break;
-    }
-    //Shrink buffer to actual size
-    if(bytes_left+bytes_read < chunk->uncompressed_data.n) {
-      r = mbuffer_realloc( &chunk->uncompressed_data, bytes_left+bytes_read);
-      assert(r == 0);
-    }
-
-    //Check whether any new data was read in, process last chunk if not
-    if(bytes_read == 0) {
-#ifdef ENABLE_STATISTICS
-      //update statistics
-      stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
-#endif //ENABLE_STATISTICS
-
-      // Pthreads code will send to FragmentRefine here...
-      {
-	  InnerPipeline inner( chunk );
-	  std::list<chunk_t *> & ll = inner.get_list();
-	  for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
-	      write_chunk_to_file( fd_out, *I );
-	  }
-      }
-
-      //stop fetching from input buffer, terminate processing
-      break;
-    }
-
-    // "FragmentRefine"
-
-    //partition input block into fine-granular chunks
-    int split;
-    do {
-      split = 0;
-      //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
-      if(ANCHOR_JUMP < chunk->uncompressed_data.n) {
-	  int offset = rabinseg((uchar*)chunk->uncompressed_data.ptr + ANCHOR_JUMP, (int)chunk->uncompressed_data.n - ANCHOR_JUMP, rf_win_dataprocess, rabintab, rabinwintab);
-      //Did we find a split location?
-	  if(offset == 0) {
-	    //Split found at the very beginning of the buffer (should never happen due to technical limitations)
-	    assert(0);
-	    split = 0;
-	  } else if(offset < (int)chunk->uncompressed_data.n) {
-	    //Split found somewhere in the middle of the buffer
-	    //Allocate a new chunk and create a new memory buffer
-	    temp = (chunk_t *)malloc(sizeof(chunk_t));
-	    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
-
-	    //split it into two pieces
-	    r = mbuffer_split(&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
-	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
-	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
-
-    #ifdef ENABLE_STATISTICS
-	    //update statistics
-	    stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
-    #endif //ENABLE_STATISTICS
-
-	    {
-		InnerPipeline inner( chunk );
-		std::list<chunk_t *> & ll = inner.get_list();
-		for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
-		    write_chunk_to_file( fd_out, *I );
-		}
-	    }
-
-	    //prepare for next iteration
-	    chunk = temp;
-	    temp = NULL;
-	    split = 1;
-	  } else {
-	    //Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
-	    //This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
-	    split = 0;
-	  }
-      } else {
-	  split = 0;
-      }
-    } while(split);
-    temp = (chunk_t*)chunk;
-    chunk = 0;
-  }
-
-  free( (void*)rabintab);
-  free( (void*)rabinwintab);
-
-  close( (int)fd_out);
-
-  return;
-}
-#endif
 
 void *SerialIntegratedPipeline(void * targs) {
   struct thread_args *args = (struct thread_args *)targs;

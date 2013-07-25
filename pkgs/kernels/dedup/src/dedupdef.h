@@ -80,7 +80,7 @@ typedef enum {
   CHUNK_STATE_FLUSHED=2        //no data available because chunk has already been flushed
 } chunk_state_t;
 
-#ifdef ENABLE_PTHREADS
+#if defined( ENABLE_PTHREADS ) || defined( BUDDY_REORDER )
 
 //Definition and basic functions for a two-level sequence number
 typedef u_int32 sequence_number_t;
@@ -150,7 +150,11 @@ static inline void sequence_reset(sequence_t *s) {
 typedef struct _chunk_t {
   struct {
     int isDuplicate;        //whether this is an original chunk or a duplicate
+#ifdef BUDDY_REORDER
+    volatile chunk_state_t state;    //which type of data this chunk contains
+#else
     chunk_state_t state;    //which type of data this chunk contains
+#endif
 #ifdef ENABLE_PTHREADS
     //once a chunk has been added to the global database accesses
     //to the state require synchronization b/c the chunk is globally viewable
@@ -168,6 +172,12 @@ typedef struct _chunk_t {
   mbuffer_t compressed_data;
   //reference to original chunk with compressed data (only if isDuplicate)
   struct _chunk_t *compressed_data_ref;
+#ifdef BUDDY_REORDER
+  //Original location of the chunk in input stream (for reordering)
+  sequence_t sequence;
+  // Pointer to buddy
+  struct _chunk_t * buddy;
+#endif
 #ifdef ENABLE_PTHREADS
   //Original location of the chunk in input stream (for reordering)
   sequence_t sequence;
