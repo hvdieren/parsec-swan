@@ -31,6 +31,7 @@
 #include <list>
 
 #include "tbb/pipeline.h"
+#include "tbb/task_scheduler_init.h"
 
 #define OUTER_PIPELINE_NUM_TOKENS 1024 
 #define INNER_PIPELINE_NUM_TOKENS 1024
@@ -388,9 +389,7 @@ void sub_Deduplicate(chunk_t *chunk) {
   return;
 }
 
-class InnerPipeline {
-    std::list<chunk_t *> list_out;
-
+class InnerPipeline : public tbb::filter {
     class FragmentRefine : public tbb::filter {
 	u32int rabintab[256];
 	u32int rabinwintab[256];
@@ -478,13 +477,18 @@ class InnerPipeline {
     };
 
 public:
-    InnerPipeline( chunk_t * chunk ) {
+    InnerPipeline() : filter( false ) { }
+
+    void * operator() ( void * item ) {
+	chunk_t * chunk = (chunk_t *)item;
+	std::list<chunk_t *> * list_out = new std::list<chunk_t *>();
+
 	tbb::pipeline inner;
 
 	FragmentRefine refine( chunk );
 	Deduplicate deduplicate;
 	Compress compress;
-	Reassemble reassemble( list_out );
+	Reassemble reassemble( *list_out );
 
 	inner.add_filter( refine );
 	inner.add_filter( deduplicate );
@@ -493,15 +497,223 @@ public:
 
 	inner.run( INNER_PIPELINE_NUM_TOKENS );
 	inner.clear();
-    }
 
-    std::list<chunk_t *> & get_list() { return list_out; }
+	return (void *)list_out;
+    }
 };
 
-/* 
- * Integrate all computationally intensive pipeline
- * stages to improve cache efficiency.
- */
+class OuterPipeline {
+    int fd_out;
+
+    class Fragment : public tbb::filter {
+	u32int rabintab[256];
+	u32int rabinwintab[256];
+	struct thread_args * args;
+	int fd;
+	int split;
+	size_t preloading_buffer_seek;
+	chunk_t *temp;
+	chunk_t *chunk;
+	static const int rf_win_dataprocess = 0;
+
+    public:
+	Fragment( struct thread_args * args ) : tbb::filter( true ), args( args ) {
+	    rabininit(rf_win_dataprocess, rabintab, rabinwintab);
+	    fd = args->fd;
+	    split = 0;
+	    preloading_buffer_seek = 0;
+	    temp = NULL;
+	    chunk = NULL;
+
+	    //Sanity check
+	    if(MAXBUF < 8 * ANCHOR_JUMP) {
+		printf("WARNING: I/O buffer size is very small. Performance degraded.\n");
+		fflush(NULL);
+	    }
+	}
+
+	void * operator()( void * ) {
+	    int r;
+
+	    if( split < 0 )
+		return NULL;
+
+	    //read from input file / buffer
+	outer_loop:
+	    if( !split ) {
+		size_t bytes_left; //amount of data left over in last_mbuffer from previous iteration
+
+		//Check how much data left over from previous iteration resp. create an initial chunk
+		if(temp != NULL) {
+		    bytes_left = temp->uncompressed_data.n;
+		} else {
+		    bytes_left = 0;
+		}
+
+		//Make sure that system supports new buffer size
+		if(MAXBUF+bytes_left > SSIZE_MAX) {
+		    EXIT_TRACE("Input buffer size exceeds system maximum.\n");
+		}
+		//Allocate a new chunk and create a new memory buffer
+		chunk = (chunk_t *)malloc(sizeof(chunk_t));
+		if(chunk==NULL) EXIT_TRACE("Memory allocation failed.\n");
+		r = mbuffer_create(&chunk->uncompressed_data, MAXBUF+bytes_left);
+		if(r!=0) {
+		    EXIT_TRACE("Unable to initialize memory buffer.\n");
+		}
+		chunk->header.state = CHUNK_STATE_UNCOMPRESSED;
+		if(bytes_left > 0) {
+		    //FIXME: Short-circuit this if no more data available
+
+		    //"Extension" of existing buffer, copy sequence number and left over data to beginning of new buffer
+		    //NOTE: We cannot safely extend the current memory region because it has already been given to another thread
+		    memcpy(chunk->uncompressed_data.ptr, temp->uncompressed_data.ptr, temp->uncompressed_data.n);
+		    mbuffer_free(&temp->uncompressed_data);
+		    free((void*)temp);
+		    temp = NULL;
+		}
+		//Read data until buffer full
+		size_t bytes_read=0;
+		if(conf->preloading) {
+		    size_t max_read = MIN(MAXBUF, args->input_file.size-preloading_buffer_seek);
+		    memcpy((char*)chunk->uncompressed_data.ptr+bytes_left, (char*)args->input_file.buffer+preloading_buffer_seek, max_read);
+		    bytes_read = max_read;
+		    preloading_buffer_seek += max_read;
+		} else {
+		    while(bytes_read < MAXBUF) {
+			r = read( fd, (void*)((char*)chunk->uncompressed_data.ptr+bytes_left+bytes_read), (size_t)MAXBUF-bytes_read);
+			if(r<0) switch(errno) {
+			    case EAGAIN:
+				EXIT_TRACE("I/O error: No data available\n");break;
+			    case EBADF:
+				EXIT_TRACE("I/O error: Invalid file descriptor\n");break;
+			    case EFAULT:
+				EXIT_TRACE("I/O error: Buffer out of range\n");break;
+			    case EINTR:
+				EXIT_TRACE("I/O error: Interruption\n");break;
+			    case EINVAL:
+				EXIT_TRACE("I/O error: Unable to read from file descriptor\n");break;
+			    case EIO:
+				EXIT_TRACE("I/O error: Generic I/O error\n");break;
+			    case EISDIR:
+				EXIT_TRACE("I/O error: Cannot read from a directory\n");break;
+			    default:
+				EXIT_TRACE("I/O error: Unrecognized error\n");break;
+			    }
+			if(r==0) break;
+			bytes_read += r;
+		    }
+		}
+		//No data left over from last iteration and also nothing new read in, simply clean up and quit
+		if(bytes_left + bytes_read == 0) {
+		    mbuffer_free( &chunk->uncompressed_data);
+		    free( (void*)chunk);
+		    chunk = NULL;
+		    split = -1;
+		    return NULL;
+		}
+		//Shrink buffer to actual size
+		if(bytes_left+bytes_read < chunk->uncompressed_data.n) {
+		    r = mbuffer_realloc( &chunk->uncompressed_data, bytes_left+bytes_read);
+		    assert(r == 0);
+		}
+
+		//Check whether any new data was read in, process last chunk if not
+		if(bytes_read == 0) {
+#ifdef ENABLE_STATISTICS
+		    //update statistics
+		    stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
+#endif //ENABLE_STATISTICS
+
+		    return (void *)chunk;
+		    split = -1;
+		}
+	    }
+
+	    //partition input block into fine-granular chunks
+	    split = 0;
+	    //Try to split the buffer at least ANCHOR_JUMP bytes away from its beginning
+	    if(ANCHOR_JUMP < chunk->uncompressed_data.n) {
+		int offset = rabinseg((uchar*)chunk->uncompressed_data.ptr + ANCHOR_JUMP, (int)chunk->uncompressed_data.n - ANCHOR_JUMP, rf_win_dataprocess, rabintab, rabinwintab);
+		//Did we find a split location?
+		if(offset == 0) {
+		    //Split found at the very beginning of the buffer (should never happen due to technical limitations)
+		    assert(0);
+		    split = 0;
+		} else if(offset < (int)chunk->uncompressed_data.n) {
+		    //Split found somewhere in the middle of the buffer
+		    //Allocate a new chunk and create a new memory buffer
+		    temp = (chunk_t *)malloc(sizeof(chunk_t));
+		    if(temp==NULL) EXIT_TRACE("Memory allocation failed.\n");
+
+		    //split it into two pieces
+		    r = mbuffer_split(&chunk->uncompressed_data, &temp->uncompressed_data, (size_t)offset);
+		    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
+		    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
+
+#ifdef ENABLE_STATISTICS
+		    //update statistics
+		    stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
+#endif //ENABLE_STATISTICS
+
+		    //prepare for next iteration
+		    chunk_t * ret = chunk;
+		    chunk = temp;
+		    split = 1;
+		    return (void *)ret;
+		} else {
+		    //Due to technical limitations we can't distinguish the cases "no split" and "split at end of buffer"
+		    //This will result in some unnecessary (and unlikely) work but yields the correct result eventually.
+		    split = 0;
+		}
+	    } else {
+		split = 0;
+	    }
+
+	    temp = (chunk_t*)chunk;
+	    chunk = 0;
+
+	    goto outer_loop;
+	}
+    };
+
+    class Reorder : public tbb::filter {
+	int fd_out;
+    public:
+	Reorder( int fd_out ) : tbb::filter( true ), fd_out( fd_out ) {
+	}
+
+	void * operator()( void * l ) {
+	    std::list<chunk_t *> & ll = *(std::list<chunk_t *>*)l;
+	    for( std::list<chunk_t *>::const_iterator I=ll.begin(), E=ll.end(); I != E; ++I ) {
+		write_chunk_to_file( fd_out, *I );
+	    }
+	    delete &ll;
+	    return NULL;
+	}
+    };
+public:
+    OuterPipeline( struct thread_args * args ) {
+	fd_out = create_output_file(conf->outfile);
+
+	tbb::pipeline outer;
+
+	Fragment fragment( args );
+	InnerPipeline inner;
+	Reorder reorder( fd_out );
+
+	outer.add_filter( fragment );
+	outer.add_filter( inner );
+	outer.add_filter( reorder );
+
+	outer.run( OUTER_PIPELINE_NUM_TOKENS );
+	outer.clear();
+
+	close( (int)fd_out);
+    }
+};
+
+#if 0
 void TBBIntegratedPipeline(struct thread_args * args) {
   size_t preloading_buffer_seek = 0;
   int fd = args->fd;
@@ -685,6 +897,7 @@ void TBBIntegratedPipeline(struct thread_args * args) {
 
   return;
 }
+#endif
 
 void *SerialIntegratedPipeline(void * targs) {
   struct thread_args *args = (struct thread_args *)targs;
@@ -972,7 +1185,9 @@ void Encode(config_t * _conf) {
 #endif
 
   //Do the processing
-  TBBIntegratedPipeline(&generic_args);
+  // TBBIntegratedPipeline(&generic_args);
+  tbb::task_scheduler_init init( conf->nthreads );
+  OuterPipeline outer( &generic_args );
 
 #ifdef ENABLE_PARSEC_HOOKS
   __parsec_roi_end();
