@@ -33,7 +33,7 @@
 #include "tbb/pipeline.h"
 #include "tbb/task_scheduler_init.h"
 
-#define OUTER_PIPELINE_NUM_TOKENS 1024 
+#define OUTER_PIPELINE_NUM_TOKENS 32 
 #define INNER_PIPELINE_NUM_TOKENS 1024
 
 extern "C" {
@@ -723,46 +723,49 @@ class OuterPipeline {
 		chunk_t * chunk = *I;
 
 #ifdef BUDDY_REORDER
-		if( chunk->header.state == CHUNK_STATE_FLUSHED ) {
-		    // This chunk has a duplicate buddy earlier in the stream, and its data have been
-		    // output for its buddy
-		    assert( !chunk->header.isDuplicate );
+		if( !chunk->header.isDuplicate ) {
+		    if( chunk->header.state == CHUNK_STATE_COMPRESSED ) {
+			// This is not a duplicate. It has been compressed. There is no buddy.
+			// assert( !chunk->header.isDuplicate );
+			// assert( !chunk->buddy );
 
-		    //Duplicate chunk, data has been written to file before, just write SHA1
-		    write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
-		    mbuffer_free(&chunk->compressed_data); // Delay deallocation until now...
-		} else if( chunk->header.state == CHUNK_STATE_COMPRESSED ) {
-		    // This is not a duplicate. It has been compressed. There is no buddy.
-		    assert( !chunk->header.isDuplicate );
-		    assert( !chunk->buddy );
+			//Unique chunk, data has not been written yet, do so now
+			write_file(fd_out, TYPE_COMPRESS, chunk->compressed_data.n, (uint8_t*)chunk->compressed_data.ptr);
+			chunk->header.state = CHUNK_STATE_FLUSHED;
+			mbuffer_free(&chunk->compressed_data);
+		    } else { // if( __builtin_expect( chunk->header.state == CHUNK_STATE_FLUSHED, 0 ) ) {
+			// This chunk has a duplicate buddy earlier in the stream, and its data have been
+			// output for its buddy
+			// assert( !chunk->header.isDuplicate );
 
-		    //Unique chunk, data has not been written yet, do so now
-		    write_file(fd_out, TYPE_COMPRESS, chunk->compressed_data.n, (uint8_t*)chunk->compressed_data.ptr);
-		    // mbuffer_free(&chunk->compressed_data);
+			//Duplicate chunk, data has been written to file before, just write SHA1
+			write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+			mbuffer_free(&chunk->compressed_data); // Delay deallocation until now...
+		    }
 		} else {
-		    // This is a duplicate. With or without a buddy.
-		    assert( chunk->header.isDuplicate );
-		    assert( chunk->buddy );
+		    // This is a duplicate. With a buddy.
+		    // assert( chunk->header.isDuplicate );
+		    // assert( chunk->buddy );
 
 		    // Is this chunk logically before it's buddy? If so, output
 		    // data now and mark buddy as such
-		    assert( !chunk->buddy->header.isDuplicate );
-		    if( sequence_lt( chunk->sequence, chunk->buddy->sequence ) ) {
-			// Wait until buddy is compressed
-			while( chunk->buddy->header.state == CHUNK_STATE_UNCOMPRESSED );
-
+		    // assert( !chunk->buddy->header.isDuplicate );
+		    // if( __builtin_expect( sequence_lt( chunk->sequence, chunk->buddy->sequence ), 0 ) ) {
 			if( chunk->buddy->header.state == CHUNK_STATE_FLUSHED ) {
 			    // Buddy has already been written. At least 2 chunks have been overtaken. Write SHA1.
 			    write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
 			} else {
+			    // Wait until buddy is compressed
+			    while( *((volatile chunk_state_t*)&(chunk->buddy->header.state)) == CHUNK_STATE_UNCOMPRESSED );
+
 			    // Write the buddy's data now, and mark it as such.
 			    write_file(fd_out, TYPE_COMPRESS, chunk->buddy->compressed_data.n, (uint8_t*)chunk->buddy->compressed_data.ptr);
 			    chunk->buddy->header.state = CHUNK_STATE_FLUSHED;
 			}
-		    } else {
+		    // } else {
 			//Duplicate chunk, data has been written to file before, just write SHA1
-			write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
-		    }
+			// write_file(fd_out, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+		    // }
 
 		    free((void*)chunk);
 		}

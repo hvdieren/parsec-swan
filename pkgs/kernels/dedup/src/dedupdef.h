@@ -151,7 +151,7 @@ typedef struct _chunk_t {
   struct {
     int isDuplicate;        //whether this is an original chunk or a duplicate
 #ifdef BUDDY_REORDER
-    volatile chunk_state_t state;    //which type of data this chunk contains
+    chunk_state_t state;    //which type of data this chunk contains
 #else
     chunk_state_t state;    //which type of data this chunk contains
 #endif
