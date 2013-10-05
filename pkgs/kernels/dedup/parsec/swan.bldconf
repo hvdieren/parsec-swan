@@ -18,7 +18,7 @@
 build_deps="ssl zlib"
 
 # Temporary variable with all flags
-dedup_flags="CFLAGS=\"-I${PARSECDIR}/pkgs/libs/ssl/inst/${PARSECPLAT}/include -I${PARSECDIR}/pkgs/libs/zlib/inst/${PARSECPLAT}/include -I${HOME}/research/swan-queue -I${HOME}/research/swan-queue/swan -I${HOME}/research/swan-queue/obj -I${HOME}/research/swan-queue/obj/scheduler -DENABLE_SWAN ${CFLAGS}\" LDFLAGS=\"-L${PARSECDIR}/pkgs/libs/ssl/inst/${PARSECPLAT}/lib -L${PARSECDIR}/pkgs/libs/zlib/inst/${PARSECPLAT}/lib ${HOME}/research/swan-queue/obj/scheduler/libschedulers.a -lhwloc -lpthread ${LDFLAGS}\""
+dedup_flags="CFLAGS=\"-I${PARSECDIR}/pkgs/libs/ssl/inst/${PARSECPLAT}/include -I${PARSECDIR}/pkgs/libs/zlib/inst/${PARSECPLAT}/include -I${SWAN_DIR} -I${SWAN_DIR}/swan -I${SWAN_DIR}/obj -I${SWAN_DIR}/obj/scheduler -DENABLE_SWAN ${CFLAGS}\" LDFLAGS=\"-L${PARSECDIR}/pkgs/libs/ssl/inst/${PARSECPLAT}/lib -L${PARSECDIR}/pkgs/libs/zlib/inst/${PARSECPLAT}/lib ${SWAN_DIR}/obj/scheduler/libschedulers.a ${SWAN_DIR}/obj/util/libtime_us.a -lhwloc -lpthread ${LDFLAGS}\""
 
 # Environment to use for configure script and Makefile
 #build_env="version=\"swan\" ${dedup_flags}"
