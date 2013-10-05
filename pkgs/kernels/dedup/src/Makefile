@@ -42,10 +42,10 @@ ifdef version
     DEDUP_OBJ += dedup_swan.o encoder-funcobj.o
   else
   ifeq "$(version)" "swan-obj"
-    CFLAGS += -DENABLE_SWAN -pthread
-    CXXFLAGS += -DENABLE_SWAN -pthread
+    CFLAGS += -DENABLE_SWAN -pthread -DPARALLEL -DBUDDY_REORDER
+    CXXFLAGS += -DENABLE_SWAN -pthread -DPARALLEL -DBUDDY_REORDER
     DEDUP_OBJ := dedup_swan.o encoder_lists.o $(DEDUP_OBJ)
-    encoder_lists.o: CC="$(CXX) -I/home/hvandierendonck/research/parsec-3.0/bin/../pkgs/libs/ssl/inst/amd64-linux.swan-obj/include -I/home/hvandierendonck/research/parsec-3.0/bin/../pkgs/libs/zlib/inst/amd64-linux.swan-obj/include -I/home/hvandierendonck/research/swan-queue -I/home/hvandierendonck/research/swan-queue/swan -I/home/hvandierendonck/research/swan-queue/obj -I/home/hvandierendonck/research/swan-queue/obj/scheduler $(CXXFLAGS) $(CFLAGS)"
+    encoder_lists.o: CC="$(CXX) -I/home/hvandierendonck/research/parsec-3.0/bin/../pkgs/libs/ssl/inst/amd64-linux.swan-obj/include -I/home/hvandierendonck/research/parsec-3.0/bin/../pkgs/libs/zlib/inst/amd64-linux.swan-obj/include -I/home/hvandierendonck/research/swan-github2 -I/home/hvandierendonck/research/swan-github2/swan -I/home/hvandierendonck/research/swan-github2/obj -I/home/hvandierendonck/research/swan-github2/obj/scheduler $(CXXFLAGS) $(CFLAGS)"
     COMPILER=$(CXX)
     COMPILER_FLAGS=$(CXXFLAGS)
   else
@@ -56,6 +56,7 @@ ifdef version
 endif
 
 CFLAGS+=-g
+CXXFLAGS+=-g
 
 #CFLAGS+=-pg -p
 #COMPILER_FLAGS+=-pg -p

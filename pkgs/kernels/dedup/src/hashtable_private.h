@@ -28,7 +28,7 @@ struct hash_entry
 struct hashtable {
     unsigned int tablelength;
     struct hash_entry **table;
-#ifdef ENABLE_PTHREADS
+#ifdef PARALLEL
     //Each entry in table array is protected with its own lock
     pthread_mutex_t *locks;
 #endif

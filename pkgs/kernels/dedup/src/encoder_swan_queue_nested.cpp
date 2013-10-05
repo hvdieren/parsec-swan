@@ -33,12 +33,17 @@
 #include <fcntl.h>
 #include <string.h>
 
+#ifdef ENABLE_SWAN
+#include "swan/wf_interface.h"
+#include "swan/queue/queue_t.h"
+#endif
+
 extern "C" {
 #include "util.h"
 #include "dedupdef.h"
 #include "debug.h"
-#include "hashtable.h"
 #include "config.h"
+#include "hashtable.h"
 #include "rabin.h"
 #include "mbuffer.h"
 }
@@ -46,10 +51,6 @@ extern "C" {
 #include "encoder.h"
 
 #ifdef ENABLE_SWAN
-#include "swan/wf_interface.h"
-#include "swan/queue/queue_t.h"
-#include "binheap.h"
-
 // TODO: increase QSIZE1 with LEAF!
 // #define QSIZE1 15
 #define QSIZE1 4095
@@ -250,19 +251,68 @@ static int create_output_file(char *outfile) {
 //NOTE: The serial version relies on the fact that chunks are processed in-order,
 //      which means if it reaches the function it is guaranteed all data is ready.
 static void write_chunk_to_file(int fd, chunk_t *chunk) {
-  assert(chunk!=NULL);
+#ifdef BUDDY_REORDER
+    if( !chunk->header.isDuplicate ) {
+	if( chunk->header.state == CHUNK_STATE_COMPRESSED ) {
+	    // This is not a duplicate. It has been compressed. There is no buddy.
+	    // assert( !chunk->header.isDuplicate );
+	    // assert( !chunk->buddy );
 
-  if(!chunk->header.isDuplicate) {
-    //Unique chunk, data has not been written yet, do so now
-    write_file(fd, TYPE_COMPRESS, chunk->compressed_data.n, (uint8_t*)chunk->compressed_data.ptr);
-    mbuffer_free(&chunk->compressed_data);
-  } else {
-    //Duplicate chunk, data has been written to file before, just write SHA1
-    write_file(fd, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
-  }
+	    //Unique chunk, data has not been written yet, do so now
+	    write_file(fd, TYPE_COMPRESS, chunk->compressed_data.n, (uint8_t*)chunk->compressed_data.ptr);
+	    chunk->header.state = CHUNK_STATE_FLUSHED;
+	    mbuffer_free(&chunk->compressed_data);
+	} else { // if( __builtin_expect( chunk->header.state == CHUNK_STATE_FLUSHED, 0 ) ) {
+	    // This chunk has a duplicate buddy earlier in the stream, and its data have been
+	    // output for its buddy
+	    // assert( !chunk->header.isDuplicate );
 
-  if(chunk->header.isDuplicate)
-      free((void*)chunk);
+	    //Duplicate chunk, data has been written to file before, just write SHA1
+	    write_file(fd, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+	    mbuffer_free(&chunk->compressed_data); // Delay deallocation until now...
+	}
+    } else {
+	// This is a duplicate. With a buddy.
+	// assert( chunk->header.isDuplicate );
+	// assert( chunk->buddy );
+
+	// Is this chunk logically before it's buddy? If so, output
+	// data now and mark buddy as such
+	// assert( !chunk->buddy->header.isDuplicate );
+	// if( __builtin_expect( sequence_lt( chunk->sequence, chunk->buddy->sequence ), 0 ) ) {
+	if( chunk->buddy->header.state == CHUNK_STATE_FLUSHED ) {
+	    // Buddy has already been written. At least 2 chunks have been overtaken. Write SHA1.
+	    write_file(fd, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+	} else {
+	    // Wait until buddy is compressed
+	    while( *((volatile chunk_state_t*)&(chunk->buddy->header.state)) == CHUNK_STATE_UNCOMPRESSED );
+
+	    // Write the buddy's data now, and mark it as such.
+	    write_file(fd, TYPE_COMPRESS, chunk->buddy->compressed_data.n, (uint8_t*)chunk->buddy->compressed_data.ptr);
+	    chunk->buddy->header.state = CHUNK_STATE_FLUSHED;
+	}
+	// } else {
+	//Duplicate chunk, data has been written to file before, just write SHA1
+	// write_file(fd, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+	// }
+
+	free((void*)chunk);
+    }
+#else
+    assert(chunk!=NULL);
+
+    if(!chunk->header.isDuplicate) {
+	//Unique chunk, data has not been written yet, do so now
+	write_file(fd, TYPE_COMPRESS, chunk->compressed_data.n, (uint8_t*)chunk->compressed_data.ptr);
+	mbuffer_free(&chunk->compressed_data);
+    } else {
+	//Duplicate chunk, data has been written to file before, just write SHA1
+	write_file(fd, TYPE_FINGERPRINT, SHA1_LEN, (unsigned char *)(chunk->sha1));
+    }
+
+    if(chunk->header.isDuplicate)
+	free((void*)chunk);
+#endif
 } 
 static void write_chunk_to_file_df(obj::inoutdep<int> fd, obj::indep<chunk_t *>chunk) {
     //printf( "write: chunk: %p (@%p)\n", (chunk_t*)chunk, chunk.get_version()->get_ptr() );
@@ -353,6 +403,10 @@ void sub_Compress(chunk_t *chunk) {
         stats.total_compressed += chunk->compressed_data.n;
 #endif //ENABLE_STATISTICS
 
+#ifdef BUDDY_REORDER
+     chunk->header.state = CHUNK_STATE_COMPRESSED;
+#endif
+
      return;
 }
 
@@ -363,6 +417,7 @@ void sub_Compress_df(obj::inoutdep<chunk_t *>chunk) {
 
 void sub_Compress_push_df(obj::inoutdep<chunk_t *>chunk, obj::pushdep<chunk_t *>queue ) {
     leaf_call( sub_Compress, (chunk_t*)chunk );
+    assert((chunk_t *)chunk!=NULL);
     queue.push( (chunk_t*)chunk );
 }
 
@@ -386,8 +441,8 @@ void sub_SHA1(chunk_t *chunk) {
 
 void sub_Deduplicate(chunk_t *chunk) {
 #if !CINOUT
-    static mcs_mutex lock;
-    mcs_mutex::node lock_node;
+    // static mcs_mutex lock;
+    // mcs_mutex::node lock_node;
 #endif
 
     int isDuplicate;
@@ -400,9 +455,17 @@ void sub_Deduplicate(chunk_t *chunk) {
     SHA1_Digest( (const void*)chunk->uncompressed_data.ptr, chunk->uncompressed_data.n, (unsigned char *)(chunk->sha1));
 #endif
 
+#ifdef BUDDY_REORDER
+  chunk->buddy = 0;
+#endif
+
     //Query database to determine whether we've seen the data chunk before
 #if !CINOUT
-    lock.lock( &lock_node );
+    // lock.lock( &lock_node );
+#ifdef PARALLEL
+  pthread_mutex_t *ht_lock = hashtable_getlock(cache, (void *)(chunk->sha1));
+  pthread_mutex_lock(ht_lock);
+#endif
 #endif
     entry = (chunk_t *)hashtable_search(cache, (void *)(chunk->sha1));
     isDuplicate = (entry != NULL);
@@ -413,17 +476,26 @@ void sub_Deduplicate(chunk_t *chunk) {
 	if (hashtable_insert(cache, (void *)(chunk->sha1), (void *)chunk) == 0) {
 	    EXIT_TRACE("hashtable_insert failed");
 	}
-#if !CINOUT
-        lock.unlock( &lock_node );
-#endif
+//#if !CINOUT
+        //lock.unlock( &lock_node );
+//#endif
     } else {
-#if !CINOUT
-        lock.unlock( &lock_node );
+#ifdef BUDDY_REORDER
+      chunk->buddy = entry;
 #endif
+//#if !CINOUT
+        //lock.unlock( &lock_node );
+//#endif
 	// Cache hit: Skipping compression stage
 	chunk->compressed_data_ref = entry;
 	mbuffer_free(&chunk->uncompressed_data);
     }
+#if !CINOUT
+    // lock.unlock( &lock_node );
+#ifdef PARALLEL
+    pthread_mutex_unlock(ht_lock);
+#endif
+#endif
 
 #ifdef ENABLE_STATISTICS
     // HV: TODO: use reducer on stats ...
@@ -460,11 +532,11 @@ void sub_SDCqt( obj::popdep<chunk_t*> queue_in, obj::pushdep<chunk_t*> queue_out
 		obj::outdep<int> token ) {
     while( !queue_in.empty() ) {
 	obj::read_slice<obj::queue_metadata, chunk_t*> rslice
-	    = queue_in.get_slice_upto( QSIZE2, 0 );
+	    = queue_in.get_read_slice_upto( QSIZE2, 0 );
 #if LEAF
 	// obj::write_slice<obj::queue_metadata, chunk_t*> wslice
-	    // = queue_out.get_write_slice( rslice.get_npops() );
-	for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	    // = queue_out.get_write_slice( rslice.get_length() );
+	for( size_t i=0; i < rslice.get_length(); ++i ) {
 	    chunk_t * chunk = rslice.pop();
 	    //Deduplicate
 	    // leaf_call(sub_SHA1, chunk);
@@ -475,14 +547,16 @@ void sub_SDCqt( obj::popdep<chunk_t*> queue_in, obj::pushdep<chunk_t*> queue_out
 		leaf_call( sub_Compress, chunk );
 
 	    // wslice.push( chunk );
+	    assert(chunk!=NULL);
 	    queue_out.push( chunk );
 	}
 	// wslice.commit();
 #else
 	obj::write_slice<obj::queue_metadata, chunk_t*> wslice
-	    = queue_out.get_write_slice( rslice.get_npops() );
-	for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	    = queue_out.get_write_slice( rslice.get_length() );
+	for( size_t i=0; i < rslice.get_length(); ++i ) {
 	    chunk_t * chunk = rslice.pop();
+	    assert(chunk!=NULL);
 	    wslice.push( chunk ); // still invisible to consumer!
 
 	    //Deduplicate
@@ -511,11 +585,12 @@ void sub_Wt( int fd_out,
 
     while( !queue.empty() ) {
       chunk_t * chunk = queue.pop();
+      assert(chunk!=NULL);
       leaf_call(write_chunk_to_file, fd_out, chunk);
       /*
       obj::read_slice<obj::queue_metadata, chunk_t*> rslice
-	          = queue.get_slice_upto( QSIZE1, 0 );
-      for( size_t i=0; i < rslice.get_npops(); ++i ) {
+	          = queue.get_read_slice_upto( QSIZE1, 0 );
+      for( size_t i=0; i < rslice.get_length(); ++i ) {
 	chunk_t * chunk = rslice.pop();
 
 	leaf_call(write_chunk_to_file, fd_out, chunk);
@@ -533,8 +608,8 @@ void sub_FragmentRefine_df2( struct thread_args * args,
   int r;
 
   chunk_t *temp;
-  u32int * rabintab = malloc(256*sizeof rabintab[0]);
-  u32int * rabinwintab = malloc(256*sizeof rabintab[0]);
+  u32int rabintab[256];
+  u32int rabinwintab[256];
   if(rabintab == NULL || rabinwintab == NULL) {
     EXIT_TRACE("Memory allocation failed.\n");
   }
@@ -565,6 +640,11 @@ void sub_FragmentRefine_df2( struct thread_args * args,
       // chunk->isLastL2Chunk = FALSE;
       // chcount++;
 
+#ifdef BUDDY_REORDER
+      temp->sequence = chunk->sequence;
+      sequence_inc_l2( &temp->sequence );
+#endif
+
 #ifdef ENABLE_STATISTICS
       //update statistics
       // thread_stats->nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)]++;
@@ -573,6 +653,7 @@ void sub_FragmentRefine_df2( struct thread_args * args,
 
       //put it into send buffer
       // spawn( sub_SDC, chunk, wqueue );
+      assert(chunk!=NULL);
       if( wslice.push( chunk ) ) {
 	wslice.commit();
 	wslice = queue_out.get_write_slice( QSIZE2 );
@@ -595,6 +676,7 @@ void sub_FragmentRefine_df2( struct thread_args * args,
 
       //put it into send buffer
       // spawn( sub_SDC, chunk, wqueue );
+      assert(chunk!=NULL);
       if( wslice.push( chunk ) ) {
 	wslice.commit();
 	wslice = queue_out.get_write_slice( QSIZE2 );
@@ -609,9 +691,6 @@ void sub_FragmentRefine_df2( struct thread_args * args,
   wslice.commit();
 
   ssync();
-
-  free(rabintab);
-  free(rabinwintab);
 }
 
 void sub_df2_pair( thread_args * args, chunk_t * chunk, obj::pushdep<chunk_t*> queue_out ) {
@@ -632,11 +711,15 @@ void sub_Fragment_df2( struct thread_args * args ) {
 
   chunk_t *temp = NULL;
   chunk_t *chunk = NULL;
-  u32int * rabintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
-  u32int * rabinwintab = (uint32_t*)leaf_call(malloc,256*sizeof rabintab[0]);
+  u32int rabintab[256];
+  u32int rabinwintab[256];
   if(rabintab == NULL || rabinwintab == NULL) {
     EXIT_TRACE("Memory allocation failed.\n");
   }
+
+#ifdef BUDDY_REORDER
+  sequence_number_t seq = 0;
+#endif
 
   rf_win_dataprocess = 0;
   rabininit(rf_win_dataprocess, rabintab, rabinwintab);
@@ -667,6 +750,10 @@ void sub_Fragment_df2( struct thread_args * args ) {
     //Allocate a new chunk and create a new memory buffer
     chunk = (chunk_t *)malloc(sizeof(chunk_t));
     if(chunk==NULL) EXIT_TRACE("Memory allocation failed.\n");
+#ifdef BUDDY_REORDER
+    chunk->sequence.l1num = seq++;
+    chunk->sequence.l2num = 0;
+#endif
     r = leaf_call(mbuffer_create,&chunk->uncompressed_data, MAXBUF+bytes_left);
     if(r!=0) {
       EXIT_TRACE("Unable to initialize memory buffer.\n");
@@ -775,6 +862,11 @@ void sub_Fragment_df2( struct thread_args * args ) {
 	    if(r!=0) EXIT_TRACE("Unable to split memory buffer.\n");
 	    temp->header.state = CHUNK_STATE_UNCOMPRESSED;
 
+#ifdef BUDDY_REORDER
+	    temp->sequence.l1num = seq++;
+	    temp->sequence.l2num = 0;
+#endif
+
     #ifdef ENABLE_STATISTICS
 	    //update statistics
             __sync_fetch_and_add( &stats.nChunks[CHUNK_SIZE_TO_SLOT(chunk->uncompressed_data.n)], 1);
@@ -813,9 +905,6 @@ void sub_Fragment_df2( struct thread_args * args ) {
   }
 
   ssync();
-
-  leaf_call(free, (void*)rabintab);
-  leaf_call(free, (void*)rabinwintab);
 
   leaf_call(close, (int)fd_out);
 

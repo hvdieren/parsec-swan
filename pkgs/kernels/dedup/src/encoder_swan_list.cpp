@@ -406,16 +406,12 @@ void set_chunk_obj( obj::outdep<chunk_t*> chunk_obj, chunk_t * temp) {
     chunk_obj = temp;
 }
 
-void sub_FragmentRefine_df( obj::inoutdep /*cinoutdep*/ <hashtable*> cache_obj_in, obj::inoutdep<int> fd_out_in, obj::indep<chunk_t *> chunk_in, obj::outdep<std::list<chunk_t *>> list_obj ) {
+void sub_FragmentRefine_df( obj::indep<chunk_t *> chunk_in, obj::outdep<std::list<chunk_t *>> list_obj ) {
   // TODO: turn whole thing into leaf
   int r;
   chunk_t * temp;
   obj::object_t<chunk_t *> chunk_obj;
   chunk_obj = (chunk_t*)chunk_in;
-  obj::object_t<int> fd_out;
-  fd_out = (int)fd_out_in;
-  obj::object_t<hashtable*> cache_obj;
-  cache_obj = (hashtable*)cache_obj_in;
 
   std::list<chunk_t *> & list_out = (std::list<chunk_t *>&)list_obj;
 
@@ -458,18 +454,7 @@ void sub_FragmentRefine_df( obj::inoutdep /*cinoutdep*/ <hashtable*> cache_obj_i
 	    split = 0;
 	}
 
-#if 0
-	//Deduplicate
-	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj);
-
-	//If chunk is unique compress & archive it.
-	spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
-
-	spawn(write_chunk_to_file_df,(obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
-	call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, temp);
-#else
 	list_out.push_back( (chunk_t*)chunk_obj );
-#endif
 
 	//prepare for next iteration
 	chunk_obj = temp; // TODO: turn chunk_obj into local var
@@ -481,6 +466,23 @@ void sub_FragmentRefine_df( obj::inoutdep /*cinoutdep*/ <hashtable*> cache_obj_i
   leaf_call(free, (void*)rabinwintab);
 
   return;
+}
+
+void process_list( obj::indep<std::list<chunk_t *> > l, obj::inoutdep<int>fd_out_in,
+		   obj::inoutdep /*cinoutdep*/ <hashtable*> cache_obj_in ) {
+    std::list<chunk_t *> ll = l;
+    obj::inoutdep<int, obj::obj_recast> fd_out( fd_out_in );
+
+    obj::object_t<hashtable*> cache_obj;
+    cache_obj = (hashtable*)cache_obj_in;
+
+    for( auto I=ll.begin(), E=ll.end(); I != E; ++I ) {
+	call(set_chunk_obj, (obj::outdep<chunk_t*>)chunk_obj, *I);
+	spawn(sub_Deduplicate_df, (obj::inoutdep<chunk_t*>)chunk_obj, (obj::inoutdep /*cinoutdep*/ <hashtable*>)cache_obj);
+	spawn(sub_Compress_df, (obj::inoutdep<chunk_t*>)chunk_obj);
+	spawn(write_chunk_to_file_df, (obj::inoutdep<int>)fd_out, (obj::indep<chunk_t*>)chunk_obj);
+    }
+    ssync();
 }
 
 /* 

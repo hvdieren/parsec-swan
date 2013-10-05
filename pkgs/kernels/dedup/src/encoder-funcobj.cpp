@@ -369,6 +369,10 @@ void sub_Deduplicate(chunk_t *chunk) {
   chunk->buddy = 0;
 #endif
 
+#ifdef PARALLEL
+  pthread_mutex_t *ht_lock = hashtable_getlock(cache, (void *)(chunk->sha1));
+  pthread_mutex_lock(ht_lock);
+#endif
   //Query database to determine whether we've seen the data chunk before
   entry = (chunk_t *)hashtable_search(cache, (void *)(chunk->sha1));
   isDuplicate = (entry != NULL);
@@ -387,6 +391,9 @@ void sub_Deduplicate(chunk_t *chunk) {
     chunk->compressed_data_ref = entry;
     mbuffer_free(&chunk->uncompressed_data);
   }
+#ifdef PARALLEL
+  pthread_mutex_unlock(ht_lock);
+#endif
 
 #ifdef ENABLE_STATISTICS
       // HV: TODO: use reducer on stats ...
