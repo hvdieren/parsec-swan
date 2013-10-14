@@ -49,10 +49,11 @@ CPUS[32]='0,4,8,12,1,5,9,13,16,20,24,28,17,21,25,29,2,6,10,14,3,7,11,15,18,22,26
 mkdir -p output_${bench}_${config}
 
 for cores in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32
+#for cores in 1 8 16 24 32
 do
 for i in `seq $f $t` ; do
 export NUM_THREADS=$cores
 echo $NUM_THREADS $bench $i
-./parsecmgmt -a run -p $bench -c $config -i native -s "time numactl --physcpubind=+${CPUS[$cores]} --membind=0-$[(NUM_THREADS+7)/8-1]" > output_${bench}_${config}/${bench}_${config}_${cores}_${i}.txt
+./parsecmgmt -a run -p $bench -c $config -i native -n $cores -s "time numactl --physcpubind=+${CPUS[$cores]} --membind=0-$[(NUM_THREADS+7)/8-1]" > output_${bench}_${config}/${bench}_${config}_${cores}_${i}.txt
 done
 done

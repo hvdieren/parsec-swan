@@ -74,8 +74,8 @@ export MAKE="${GNUTOOL_HOME}/bin/${BINARY_PREFIX}make"
 PORTABILITY_FLAGS="-static-libgcc -Wl,--hash-style=both,--as-needed"
 
 # Flags for pipelining
+PIPE_FLAGS="-momit-leaf-frame-pointer -fno-omit-frame-pointer -pthread -DMODE=1 -O4 -march=amdfam10 -DOBJECT_TASKGRAPH=1 -std=c++0x"
 #PIPE_FLAGS="-momit-leaf-frame-pointer -fno-omit-frame-pointer -pthread -DMODE=1 -O0 -DOBJECT_TASKGRAPH=1 -g -pg -std=c++0x"
-PIPE_FLAGS="-momit-leaf-frame-pointer -fno-omit-frame-pointer -pthread -DMODE=1 -O4 -DOBJECT_TASKGRAPH=1 -std=c++0x"
 
 SWAN_DIR=${HOME}/research/swan-queue
 
